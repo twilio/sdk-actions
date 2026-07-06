@@ -1,0 +1,13 @@
+name: ping (verification)
+
+# Throwaway reusable workflow used ONLY to verify that public caller repos can
+# resolve a reusable workflow hosted in this internal repo. Delete once the real
+# sdk-ci.yml / sdk-publish.yml land.
+on:
+  workflow_call:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "reusable workflow reached ✅ (host=twilio/sdk-actions, caller=${{ github.repository }})"
