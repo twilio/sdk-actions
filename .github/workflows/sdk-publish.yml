@@ -1,0 +1,239 @@
+name: SDK Publish (reusable)
+
+# Centralized, versioned publish guard for Twilio npm SDKs (ADR 1634).
+# Publishes to PUBLIC npm via OIDC trusted publishing (no long-lived tokens);
+# Artifactory is used only to resolve dependencies during install.
+#
+# Consumers call this from a release-triggered workflow:
+#
+#   on:
+#     release:
+#       types: [published]
+#   jobs:
+#     publish:
+#       uses: twilio/sdk-actions/.github/workflows/sdk-publish.yml@v1
+#       permissions:
+#         contents: read
+#         id-token: write
+#       with:
+#         # PRIVATE repos (twilio-internal/*) must set provenance: false and
+#         # org-owner: twilio-internal — npm rejects provenance from private sources.
+#         provenance: true
+#
+# NOTE (load-bearing): the npm trusted-publisher binding matches the CALLER's
+# workflow filename + the `environment` value below. Keep `environment` == the
+# GitHub Environment == the npm trusted-publisher registration, or OIDC publish fails.
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        description: 'JSON array of Node versions for the pre-publish test matrix'
+        type: string
+        default: '[22, 24]'
+      org-owner:
+        description: 'repository_owner that is allowed to publish (guard)'
+        type: string
+        default: 'twilio'
+      org-runner:
+        description: 'Runner label for the org build/publish jobs'
+        type: string
+        default: 'ubuntu-x64'
+      environment:
+        description: 'GitHub Environment gating the deploy (must match npm trusted publisher)'
+        type: string
+        default: 'production'
+      tag-prefix:
+        description: "Release tag prefix; 'v' for v1.2.3, empty for un-prefixed 1.2.3"
+        type: string
+        default: 'v'
+      provenance:
+        description: 'Attach npm provenance (must be false on private source repos)'
+        type: boolean
+        default: true
+      publish-node-version:
+        description: 'Node version for the publish job (>= 24 for npm OIDC trusted publishing)'
+        type: string
+        default: '24'
+      install-command:
+        description: 'Dependency install command'
+        type: string
+        default: 'npm ci --ignore-scripts'
+      lint-command:
+        description: 'Lint command in the pre-publish test job (empty skips)'
+        type: string
+        default: 'npm run lint'
+      typecheck-command:
+        description: 'Typecheck command in the pre-publish test job (empty skips)'
+        type: string
+        default: 'npm run typecheck'
+      build-command:
+        description: 'Build command (empty skips)'
+        type: string
+        default: 'npm run build'
+      test-command:
+        description: 'Test command in the pre-publish test job (empty skips)'
+        type: string
+        default: 'npm test'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ARTIFACTORY_URL: ${{ vars.ARTIFACTORY_URL }}
+
+jobs:
+  test:
+    name: Test - Node ${{ matrix.node }}
+    runs-on: ${{ inputs.org-runner }}
+    if: github.repository_owner == inputs.org-owner
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        shell: bash
+        run: |
+          GITHUB_JWT=$(curl -sS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
+            | jq -r '.value')
+          RESP=$(curl -sS "${ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",
+                 \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
+                 \"subject_token\":\"${GITHUB_JWT}\",
+                 \"provider_name\":\"github-actions\"}")
+          ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$ART_TOKEN" ]; then
+            echo "::error::OIDC token exchange failed. Raw response (token field redacted):"
+            echo "$RESP" | jq 'if .access_token then .access_token="<redacted>" else . end' 2>/dev/null || echo "$RESP"
+            exit 1
+          fi
+          echo "::add-mask::$ART_TOKEN"
+          REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/virtual-npm-thirdparty/"
+          HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
+          {
+            echo "registry=${REGISTRY}"
+            echo "//${HOST}/artifactory/api/npm/virtual-npm-thirdparty/:_authToken=${ART_TOKEN}"
+          } > ~/.npmrc
+          echo "::notice::npm configured to use Artifactory registry"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: ${{ inputs.install-command }}
+
+      - name: Lint
+        if: ${{ inputs.lint-command != '' }}
+        run: ${{ inputs.lint-command }}
+
+      - name: Typecheck
+        if: ${{ inputs.typecheck-command != '' }}
+        run: ${{ inputs.typecheck-command }}
+
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Test
+        if: ${{ inputs.test-command != '' }}
+        run: ${{ inputs.test-command }}
+
+  deploy:
+    name: Publish to npm
+    needs: [test]
+    runs-on: ${{ inputs.org-runner }}
+    if: github.repository_owner == inputs.org-owner
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        shell: bash
+        run: |
+          GITHUB_JWT=$(curl -sS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
+            | jq -r '.value')
+          RESP=$(curl -sS "${ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",
+                 \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
+                 \"subject_token\":\"${GITHUB_JWT}\",
+                 \"provider_name\":\"github-actions\"}")
+          ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$ART_TOKEN" ]; then
+            echo "::error::OIDC token exchange failed. Raw response (token field redacted):"
+            echo "$RESP" | jq 'if .access_token then .access_token="<redacted>" else . end' 2>/dev/null || echo "$RESP"
+            exit 1
+          fi
+          echo "::add-mask::$ART_TOKEN"
+          REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/virtual-npm-thirdparty/"
+          HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
+          {
+            echo "registry=${REGISTRY}"
+            echo "//${HOST}/artifactory/api/npm/virtual-npm-thirdparty/:_authToken=${ART_TOKEN}"
+          } > ~/.npmrc
+          echo "::notice::npm configured to use Artifactory registry"
+
+      # Node 24+ required for npm OIDC trusted publisher support (npm >= 11.5.1).
+      # registry-url must be public npm so the publish targets the right registry.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.publish-node-version }}
+          registry-url: https://registry.npmjs.org
+
+      - run: ${{ inputs.install-command }}
+
+      - name: Validate tag format and version match
+        shell: bash
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [ -n "$TAG_PREFIX" ]; then
+            RE="^${TAG_PREFIX}[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+          else
+            RE="^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+          fi
+          if [[ ! "$TAG" =~ $RE ]]; then
+            echo "::error::Release tag '$TAG' must match ${TAG_PREFIX}1.2.3 or ${TAG_PREFIX}1.2.3-rc.1"
+            exit 1
+          fi
+          VERSION="${TAG#$TAG_PREFIX}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $TAG (version $VERSION) does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Publish to npm
+        # Prereleases (e.g. v1.2.3-rc.1) go to the `next` dist-tag, not `latest`.
+        shell: bash
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PROVENANCE: ${{ inputs.provenance }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#$TAG_PREFIX}"
+          ARGS=(--registry https://registry.npmjs.org --ignore-scripts --access public)
+          if [ "$PROVENANCE" = "true" ]; then
+            ARGS+=(--provenance)
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            ARGS+=(--tag next)
+          fi
+          npm publish "${ARGS[@]}"

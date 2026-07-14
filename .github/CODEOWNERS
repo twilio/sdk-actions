@@ -1,0 +1,6 @@
+# These workflows are org-referenced CI/publish guards — changes here affect
+# every consuming SDK repo. Require review from the owning team.
+#
+# TODO(PEA-1331): replace with the real owning team slug once confirmed,
+# e.g. `* @twilio/<supply-chain-team>`. Until then, @rdelprete gates changes.
+* @rdelprete

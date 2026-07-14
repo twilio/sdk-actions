@@ -1,0 +1,167 @@
+name: SDK CI (reusable)
+
+# Centralized, versioned CI guard for Twilio public npm SDKs (ADR 1634 Rule 3b).
+# Consumers call this instead of copying ci.yml per-repo:
+#
+#   jobs:
+#     ci:
+#       uses: twilio/sdk-actions/.github/workflows/sdk-ci.yml@v1
+#       permissions:
+#         contents: read
+#         id-token: write   # required for Artifactory OIDC on org (non-fork) runs
+#       with:
+#         node-versions: '[22, 24]'
+#
+# Fork PRs have no Artifactory secret, so the OIDC step is skipped and deps
+# resolve from public npm on a GitHub-hosted runner. Org PRs run on the internal
+# ubuntu-x64 runner and resolve from the curated Artifactory registry.
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        description: 'JSON array of Node versions for the test matrix'
+        type: string
+        default: '[22, 24]'
+      org-runner:
+        description: 'Runner label for org (non-fork) builds'
+        type: string
+        default: 'ubuntu-x64'
+      install-command:
+        description: 'Dependency install command'
+        type: string
+        default: 'npm ci --ignore-scripts'
+      lint-command:
+        description: 'Lint command (empty string skips the step)'
+        type: string
+        default: 'npm run lint'
+      typecheck-command:
+        description: 'Typecheck command (empty string skips the step)'
+        type: string
+        default: 'npm run typecheck'
+      build-command:
+        description: 'Build command (empty string skips the step)'
+        type: string
+        default: 'npm run build'
+      test-command:
+        description: 'Test command (empty string skips the step)'
+        type: string
+        default: 'npm test'
+      check-lockfile-hygiene:
+        description: 'Fail if package-lock.json resolves to non-public registries'
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: 'Timeout for the test job'
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ARTIFACTORY_URL: ${{ vars.ARTIFACTORY_URL }}
+
+jobs:
+  # ADR 1634 Rule 3b: public SDKs must stay installable by external consumers.
+  # A lockfile pinned to an internal Artifactory host hangs `npm ci` off-corp.
+  # Runs on a GitHub-hosted runner with no secrets — it is a pure content check.
+  lockfile-hygiene:
+    name: Lockfile hygiene
+    if: ${{ inputs.check-lockfile-hygiene }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify all deps resolve from registry.npmjs.org
+        shell: bash
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "::notice::no package-lock.json found; skipping lockfile hygiene"
+            exit 0
+          fi
+          BAD=$(grep -oE '"resolved": *"https?://[^/"]+' package-lock.json \
+            | sed -E 's/.*"(https?:\/\/[^/"]+).*/\1/' \
+            | grep -v '://registry\.npmjs\.org$' \
+            | sort -u || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::package-lock.json references non-public registries; external consumers cannot 'npm ci'. Rewrite these hosts to registry.npmjs.org:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "::notice::lockfile hygiene OK — all deps resolve from registry.npmjs.org"
+
+  test:
+    name: Test - Node ${{ matrix.node }}
+    # Internal Artifactory runners for org builds; forks fall back to GitHub-hosted.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || inputs.org-runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Forks have no secret to auth Artifactory; they resolve from public npm.
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        shell: bash
+        run: |
+          # 1. Request a GitHub JWT scoped to Artifactory as the audience.
+          GITHUB_JWT=$(curl -sS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
+            | jq -r '.value')
+
+          PAYLOAD=$(echo "$GITHUB_JWT" | cut -d. -f2 | sed 's/-/+/g; s/_/\//g' | base64 -d 2>/dev/null || true)
+          echo "::debug::OIDC claims: sub=$(echo "$PAYLOAD" | jq -r '.sub'), aud=$(echo "$PAYLOAD" | jq -r '.aud')"
+
+          # 2. Exchange the GitHub JWT for an Artifactory access token.
+          RESP=$(curl -sS "${ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",
+                 \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
+                 \"subject_token\":\"${GITHUB_JWT}\",
+                 \"provider_name\":\"github-actions\"}")
+          ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+
+          if [ -z "$ART_TOKEN" ]; then
+            echo "::error::OIDC token exchange failed. Raw response (token field redacted):"
+            echo "$RESP" | jq 'if .access_token then .access_token="<redacted>" else . end' 2>/dev/null || echo "$RESP"
+            exit 1
+          fi
+          echo "::add-mask::$ART_TOKEN"
+
+          # 3. Point npm at the curated Artifactory registry for this run.
+          REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/virtual-npm-thirdparty/"
+          HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
+          {
+            echo "registry=${REGISTRY}"
+            echo "//${HOST}/artifactory/api/npm/virtual-npm-thirdparty/:_authToken=${ART_TOKEN}"
+          } > ~/.npmrc
+          echo "::notice::npm configured to use Artifactory registry"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: ${{ inputs.install-command }}
+
+      - name: Lint
+        if: ${{ inputs.lint-command != '' }}
+        run: ${{ inputs.lint-command }}
+
+      - name: Typecheck
+        if: ${{ inputs.typecheck-command != '' }}
+        run: ${{ inputs.typecheck-command }}
+
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Test
+        if: ${{ inputs.test-command != '' }}
+        run: ${{ inputs.test-command }}
