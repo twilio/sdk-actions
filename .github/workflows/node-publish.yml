@@ -1,0 +1,290 @@
+name: Node Publish (reusable)
+
+# Centralized, versioned publish guard for a SINGLE-package Twilio npm SDK
+# (ADR 1634). For a Lerna/monorepo that publishes many packages, use
+# lerna-publish.yml instead. Publishes to PUBLIC npm via OIDC trusted publishing
+# (no long-lived tokens); Artifactory is used only to resolve dependencies.
+#
+#   on:
+#     release:
+#       types: [published]
+#   jobs:
+#     publish:
+#       uses: twilio/sdk-actions/.github/workflows/node-publish.yml@<sha>  # v1.2.3
+#       permissions:
+#         contents: read
+#         id-token: write
+#       with:
+#         package-manager: npm
+#         # tag-prefix: ''        # un-prefixed tags like 2.18.3 (twilio-voice.js)
+#         # provenance: false     # REQUIRED for private (twilio-internal/*) sources
+#         # org-owner: twilio-internal
+#
+# NOTE (load-bearing): the npm trusted-publisher binding matches the CALLER's
+# workflow filename + the `environment` value. Keep `environment` == the GitHub
+# Environment == the npm trusted-publisher registration, or OIDC publish fails.
+# Build with any package manager; PUBLISH always via `npm publish` (only npm
+# supports OIDC trusted publishing + provenance).
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: 'npm | yarn | pnpm (build/test tooling; publish is always npm)'
+        type: string
+        default: 'npm'
+      node-versions:
+        description: 'JSON array of Node versions for the pre-publish test matrix'
+        type: string
+        default: '[22, 24]'
+      org-owner:
+        description: 'repository_owner that is allowed to publish (guard)'
+        type: string
+        default: 'twilio'
+      org-runner:
+        description: 'Runner label for the org build/publish jobs'
+        type: string
+        default: 'ubuntu-x64'
+      environment:
+        description: 'GitHub Environment gating the deploy (must match npm trusted publisher)'
+        type: string
+        default: 'production'
+      tag-prefix:
+        description: "Release tag prefix; 'v' for v1.2.3, empty for un-prefixed 1.2.3"
+        type: string
+        default: 'v'
+      validate-tag:
+        description: 'Require the release tag to match package.json version'
+        type: boolean
+        default: true
+      provenance:
+        description: 'Attach npm provenance (must be false on private source repos)'
+        type: boolean
+        default: true
+      publish-node-version:
+        description: 'Node version for the publish job (>= 24 for npm OIDC trusted publishing)'
+        type: string
+        default: '24'
+      install-command:
+        description: 'Install command; empty = derive from package-manager'
+        type: string
+        default: ''
+      lint-command:
+        description: 'Lint command in the pre-publish test job (empty skips)'
+        type: string
+        default: 'npm run lint'
+      typecheck-command:
+        description: 'Typecheck command in the pre-publish test job (empty skips)'
+        type: string
+        default: 'npm run typecheck'
+      build-command:
+        description: 'Build command (empty skips)'
+        type: string
+        default: 'npm run build'
+      test-command:
+        description: 'Test command in the pre-publish test job (empty skips)'
+        type: string
+        default: 'npm test'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ARTIFACTORY_URL: ${{ vars.ARTIFACTORY_URL }}
+
+jobs:
+  test:
+    name: Test - Node ${{ matrix.node }}
+    runs-on: ${{ inputs.org-runner }}
+    if: github.repository_owner == inputs.org-owner
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Enable corepack
+        if: ${{ inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm' }}
+        shell: bash
+        run: corepack enable
+
+      - name: Artifactory OIDC Auth
+        shell: bash
+        run: |
+          GITHUB_JWT=$(curl -sS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
+            | jq -r '.value')
+          RESP=$(curl -sS "${ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",
+                 \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
+                 \"subject_token\":\"${GITHUB_JWT}\",
+                 \"provider_name\":\"github-actions\"}")
+          ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$ART_TOKEN" ]; then
+            echo "::error::OIDC token exchange failed. Raw response (token field redacted):"
+            echo "$RESP" | jq 'if .access_token then .access_token="<redacted>" else . end' 2>/dev/null || echo "$RESP"
+            exit 1
+          fi
+          echo "::add-mask::$ART_TOKEN"
+          REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/virtual-npm-thirdparty/"
+          HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
+          {
+            echo "registry=${REGISTRY}"
+            echo "//${HOST}/artifactory/api/npm/virtual-npm-thirdparty/:_authToken=${ART_TOKEN}"
+          } > ~/.npmrc
+          echo "::notice::npm configured to use Artifactory registry"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          PM: ${{ inputs.package-manager }}
+          INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        run: |
+          if [ -n "$INSTALL_OVERRIDE" ]; then
+            eval "$INSTALL_OVERRIDE"
+          else
+            case "$PM" in
+              npm)  npm ci --ignore-scripts ;;
+              yarn) yarn install --frozen-lockfile ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
+            esac
+          fi
+
+      - name: Lint
+        if: ${{ inputs.lint-command != '' }}
+        run: ${{ inputs.lint-command }}
+
+      - name: Typecheck
+        if: ${{ inputs.typecheck-command != '' }}
+        run: ${{ inputs.typecheck-command }}
+
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Test
+        if: ${{ inputs.test-command != '' }}
+        run: ${{ inputs.test-command }}
+
+  deploy:
+    name: Publish to npm
+    needs: [test]
+    runs-on: ${{ inputs.org-runner }}
+    if: github.repository_owner == inputs.org-owner
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Enable corepack
+        if: ${{ inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm' }}
+        shell: bash
+        run: corepack enable
+
+      - name: Artifactory OIDC Auth
+        shell: bash
+        run: |
+          GITHUB_JWT=$(curl -sS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
+            | jq -r '.value')
+          RESP=$(curl -sS "${ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",
+                 \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
+                 \"subject_token\":\"${GITHUB_JWT}\",
+                 \"provider_name\":\"github-actions\"}")
+          ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$ART_TOKEN" ]; then
+            echo "::error::OIDC token exchange failed. Raw response (token field redacted):"
+            echo "$RESP" | jq 'if .access_token then .access_token="<redacted>" else . end' 2>/dev/null || echo "$RESP"
+            exit 1
+          fi
+          echo "::add-mask::$ART_TOKEN"
+          REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/virtual-npm-thirdparty/"
+          HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
+          {
+            echo "registry=${REGISTRY}"
+            echo "//${HOST}/artifactory/api/npm/virtual-npm-thirdparty/:_authToken=${ART_TOKEN}"
+          } > ~/.npmrc
+          echo "::notice::npm configured to use Artifactory registry"
+
+      # Node 24+ required for npm OIDC trusted publisher support (npm >= 11.5.1).
+      # registry-url must be public npm so the publish targets the right registry.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.publish-node-version }}
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          PM: ${{ inputs.package-manager }}
+          INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        run: |
+          if [ -n "$INSTALL_OVERRIDE" ]; then
+            eval "$INSTALL_OVERRIDE"
+          else
+            case "$PM" in
+              npm)  npm ci --ignore-scripts ;;
+              yarn) yarn install --frozen-lockfile ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
+            esac
+          fi
+
+      - name: Validate tag format and version match
+        if: ${{ inputs.validate-tag }}
+        shell: bash
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [ -n "$TAG_PREFIX" ]; then
+            RE="^${TAG_PREFIX}[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+          else
+            RE="^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+          fi
+          if [[ ! "$TAG" =~ $RE ]]; then
+            echo "::error::Release tag '$TAG' must match ${TAG_PREFIX}1.2.3 or ${TAG_PREFIX}1.2.3-rc.1"
+            exit 1
+          fi
+          VERSION="${TAG#$TAG_PREFIX}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $TAG (version $VERSION) does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Publish to npm
+        # Prereleases (e.g. v1.2.3-rc.1) go to the `next` dist-tag, not `latest`.
+        shell: bash
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PROVENANCE: ${{ inputs.provenance }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#$TAG_PREFIX}"
+          ARGS=(--registry https://registry.npmjs.org --ignore-scripts --access public)
+          if [ "$PROVENANCE" = "true" ]; then
+            ARGS+=(--provenance)
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            ARGS+=(--tag next)
+          fi
+          npm publish "${ARGS[@]}"

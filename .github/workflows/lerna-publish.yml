@@ -1,32 +1,40 @@
-name: SDK Publish (reusable)
+name: Lerna Publish (reusable)
 
-# Centralized, versioned publish guard for Twilio npm SDKs (ADR 1634).
-# Publishes to PUBLIC npm via OIDC trusted publishing (no long-lived tokens);
-# Artifactory is used only to resolve dependencies during install.
+# Centralized, versioned publish guard for a Lerna MONOREPO that publishes many
+# packages (ADR 1634). For a single-package repo use node-publish.yml instead.
 #
-# Consumers call this from a release-triggered workflow:
+# Publishes to PUBLIC npm via OIDC trusted publishing; Artifactory resolves deps
+# only. Unlike node-publish.yml there is NO single tag<->version check: a Lerna
+# repo (especially independent-versioning) has many package versions, so the tag
+# is not authoritative. Version bumps are expected to be committed already; the
+# default publishes the packages whose versions are not yet on the registry
+# (`lerna publish from-package`).
 #
 #   on:
 #     release:
 #       types: [published]
 #   jobs:
 #     publish:
-#       uses: twilio/sdk-actions/.github/workflows/sdk-publish.yml@v1
+#       uses: twilio/sdk-actions/.github/workflows/lerna-publish.yml@<sha>  # v1.2.3
 #       permissions:
 #         contents: read
 #         id-token: write
 #       with:
-#         # PRIVATE repos (twilio-internal/*) must set provenance: false and
-#         # org-owner: twilio-internal — npm rejects provenance from private sources.
-#         provenance: true
+#         package-manager: yarn
+#         # publish-command: 'npx lerna publish from-git --yes'   # if you tag versions
+#         # provenance: false   # REQUIRED for private (twilio-internal/*) sources
 #
-# NOTE (load-bearing): the npm trusted-publisher binding matches the CALLER's
-# workflow filename + the `environment` value below. Keep `environment` == the
-# GitHub Environment == the npm trusted-publisher registration, or OIDC publish fails.
+# NOTE: each published package needs its OWN npm trusted-publisher binding
+# (owner/repo + this workflow filename + the `environment`). Register one per
+# package name, all pointing at lerna-publish.yml + `production`.
 
 on:
   workflow_call:
     inputs:
+      package-manager:
+        description: 'npm | yarn | pnpm (build/test tooling; publish is via lerna->npm)'
+        type: string
+        default: 'npm'
       node-versions:
         description: 'JSON array of Node versions for the pre-publish test matrix'
         type: string
@@ -43,22 +51,22 @@ on:
         description: 'GitHub Environment gating the deploy (must match npm trusted publisher)'
         type: string
         default: 'production'
-      tag-prefix:
-        description: "Release tag prefix; 'v' for v1.2.3, empty for un-prefixed 1.2.3"
-        type: string
-        default: 'v'
       provenance:
         description: 'Attach npm provenance (must be false on private source repos)'
         type: boolean
         default: true
+      publish-command:
+        description: 'Lerna publish command; the default publishes unpublished package versions'
+        type: string
+        default: 'npx lerna publish from-package --yes'
       publish-node-version:
         description: 'Node version for the publish job (>= 24 for npm OIDC trusted publishing)'
         type: string
         default: '24'
       install-command:
-        description: 'Dependency install command'
+        description: 'Install command; empty = derive from package-manager'
         type: string
-        default: 'npm ci --ignore-scripts'
+        default: ''
       lint-command:
         description: 'Lint command in the pre-publish test job (empty skips)'
         type: string
@@ -96,6 +104,11 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Enable corepack
+        if: ${{ inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm' }}
+        shell: bash
+        run: corepack enable
+
       - name: Artifactory OIDC Auth
         shell: bash
         run: |
@@ -127,9 +140,24 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          cache: ${{ inputs.package-manager }}
 
-      - run: ${{ inputs.install-command }}
+      - name: Install dependencies
+        shell: bash
+        env:
+          PM: ${{ inputs.package-manager }}
+          INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        run: |
+          if [ -n "$INSTALL_OVERRIDE" ]; then
+            eval "$INSTALL_OVERRIDE"
+          else
+            case "$PM" in
+              npm)  npm ci --ignore-scripts ;;
+              yarn) yarn install --frozen-lockfile ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
+            esac
+          fi
 
       - name: Lint
         if: ${{ inputs.lint-command != '' }}
@@ -148,14 +176,22 @@ jobs:
         run: ${{ inputs.test-command }}
 
   deploy:
-    name: Publish to npm
+    name: Publish packages to npm
     needs: [test]
     runs-on: ${{ inputs.org-runner }}
     if: github.repository_owner == inputs.org-owner
-    timeout-minutes: 10
+    timeout-minutes: 20
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Lerna's from-git / version detection needs full history + tags.
+          fetch-depth: 0
+
+      - name: Enable corepack
+        if: ${{ inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm' }}
+        shell: bash
+        run: corepack enable
 
       - name: Artifactory OIDC Auth
         shell: bash
@@ -186,54 +222,40 @@ jobs:
           echo "::notice::npm configured to use Artifactory registry"
 
       # Node 24+ required for npm OIDC trusted publisher support (npm >= 11.5.1).
-      # registry-url must be public npm so the publish targets the right registry.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.publish-node-version }}
           registry-url: https://registry.npmjs.org
 
-      - run: ${{ inputs.install-command }}
-
-      - name: Validate tag format and version match
+      - name: Install dependencies
         shell: bash
         env:
-          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PM: ${{ inputs.package-manager }}
+          INSTALL_OVERRIDE: ${{ inputs.install-command }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          if [ -n "$TAG_PREFIX" ]; then
-            RE="^${TAG_PREFIX}[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+          if [ -n "$INSTALL_OVERRIDE" ]; then
+            eval "$INSTALL_OVERRIDE"
           else
-            RE="^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
-          fi
-          if [[ ! "$TAG" =~ $RE ]]; then
-            echo "::error::Release tag '$TAG' must match ${TAG_PREFIX}1.2.3 or ${TAG_PREFIX}1.2.3-rc.1"
-            exit 1
-          fi
-          VERSION="${TAG#$TAG_PREFIX}"
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [ "$VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Tag $TAG (version $VERSION) does not match package.json version $PKG_VERSION"
-            exit 1
+            case "$PM" in
+              npm)  npm ci --ignore-scripts ;;
+              yarn) yarn install --frozen-lockfile ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
+            esac
           fi
 
       - name: Build
         if: ${{ inputs.build-command != '' }}
         run: ${{ inputs.build-command }}
 
-      - name: Publish to npm
-        # Prereleases (e.g. v1.2.3-rc.1) go to the `next` dist-tag, not `latest`.
+      - name: Publish packages via lerna
+        # lerna shells out to `npm publish` per package. npm_config_provenance
+        # toggles provenance for those child publishes (false on private repos).
         shell: bash
         env:
-          TAG_PREFIX: ${{ inputs.tag-prefix }}
-          PROVENANCE: ${{ inputs.provenance }}
+          PUBLISH_COMMAND: ${{ inputs.publish-command }}
+          npm_config_provenance: ${{ inputs.provenance }}
+          npm_config_access: public
+          npm_config_registry: https://registry.npmjs.org/
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#$TAG_PREFIX}"
-          ARGS=(--registry https://registry.npmjs.org --ignore-scripts --access public)
-          if [ "$PROVENANCE" = "true" ]; then
-            ARGS+=(--provenance)
-          fi
-          if [[ "$VERSION" == *-* ]]; then
-            ARGS+=(--tag next)
-          fi
-          npm publish "${ARGS[@]}"
+          eval "$PUBLISH_COMMAND"
