@@ -1,4 +1,4 @@
-name: 'Lockfile hygiene'
+name: 'npm lockfile hygiene'
 description: >-
   ADR 1634 Rule 3b gate. (1) Scan tracked lockfiles/resolver configs and fail
   closed on any non-public registry host; (2) optionally prove the committed

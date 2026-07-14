@@ -16,8 +16,8 @@ Implements the **build-public, gate-internal, publish-public** pattern from
 | Action | What it does |
 |--------|--------------|
 | [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points npm at the curated registry (`~/.npmrc`). No stored secret. |
-| [`lockfile-hygiene`](lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
-| [`publish`](publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
+| [`npm-lockfile-hygiene`](npm-lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
+| [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 
 Each is a **drop-in step** — you own the runner, matrix, lint, build, and test.
 
@@ -30,11 +30,11 @@ on: { push: { branches: [main] }, pull_request: {}, workflow_dispatch: {} }
 
 jobs:
   # Secret-less gate — its own job so the clean-room install is truly isolated.
-  lockfile-hygiene:
+  npm-lockfile-hygiene:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>          # v4
-      - uses: twilio/sdk-actions/lockfile-hygiene@<sha>  # v1.2.3
+      - uses: twilio/sdk-actions/npm-lockfile-hygiene@<sha>  # v1.2.3
         with:
           package-manager: yarn               # npm | yarn | pnpm
 
@@ -84,7 +84,7 @@ jobs:
         with: { node-version: 24, registry-url: 'https://registry.npmjs.org' }
       - run: npm ci --ignore-scripts
       - run: npm run build
-      - uses: twilio/sdk-actions/publish@<sha> # v1.2.3
+      - uses: twilio/sdk-actions/npm-publish@<sha> # v1.2.3
         with:
           # tag-prefix: ''      # un-prefixed tags like 2.18.3
           # provenance: false   # REQUIRED for private (twilio-internal/*) sources
@@ -92,8 +92,8 @@ jobs:
 
 ## Lerna monorepos
 
-Compose `artifactory-oidc` + `lockfile-hygiene` as above; for the publish step,
-run Lerna yourself (the `publish` action is single-package). Toggle provenance
+Compose `artifactory-oidc` + `npm-lockfile-hygiene` as above; for the publish step,
+run Lerna yourself (the `npm-publish` action is single-package). Toggle provenance
 via the env var Lerna passes through to npm:
 
 ```yaml
@@ -108,7 +108,7 @@ via the env var Lerna passes through to npm:
 
 ## Notes that bite
 
-- **`id-token: write`** must be on any job using `artifactory-oidc` or `publish`.
+- **`id-token: write`** must be on any job using `artifactory-oidc` or `npm-publish`.
 - **Publish env is `production`** — the GitHub Environment, the `environment:` in
   your workflow, and the npm trusted-publisher registration must all say
   `production`, or OIDC publish fails. (The IPD "npm" reference is stale.)
@@ -122,7 +122,7 @@ via the env var Lerna passes through to npm:
 
 > **Org policy: SHA-pin.** `@v1`-style tags on `uses:` are rejected org-wide.
 > Pin a full commit SHA with the version in a trailing comment:
-> `uses: twilio/sdk-actions/publish@<40-char-sha>  # v1.2.3`
+> `uses: twilio/sdk-actions/npm-publish@<40-char-sha>  # v1.2.3`
 
 Released as `vMAJOR.MINOR.PATCH` via GitHub Releases (following the
 `twilio-internal/github-actions-library` precedent). Dependabot bumps the SHA in
@@ -130,15 +130,15 @@ consumer repos.
 
 ## Enforcement (PEA-1331)
 
-Composable actions are opt-in, so a repo *could* omit `lockfile-hygiene`. To make
+Composable actions are opt-in, so a repo *could* omit `npm-lockfile-hygiene`. To make
 the gate un-weakenable, it's wired as an **org-level required check** (ruleset) —
 tracked as a follow-up below.
 
 ## Adoption status
 
-- [x] Composable actions: `artifactory-oidc`, `lockfile-hygiene`, `publish` (npm/yarn/pnpm, single + Lerna).
+- [x] Composable actions: `artifactory-oidc`, `npm-lockfile-hygiene`, `npm-publish` (npm/yarn/pnpm, single + Lerna).
 - [ ] Rewrite the IPD onboarding doc to reference these actions instead of copied bash.
 - [ ] Adopt across the SDK repos (typescript / python / aws / microsoft).
-- [ ] Org-level required check (ruleset) for `lockfile-hygiene`.
+- [ ] Org-level required check (ruleset) for `npm-lockfile-hygiene`.
 - [ ] Python/PyPI equivalents (PEA-1325).
 - [ ] Roll out across orgs: `twilio`, `twilio-internal`, `segmentio`, `sendgrid`.
