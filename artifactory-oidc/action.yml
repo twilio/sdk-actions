@@ -1,0 +1,74 @@
+name: 'Artifactory OIDC login'
+description: >-
+  Exchange the GitHub Actions OIDC token for a short-lived Artifactory access
+  token and point npm at the curated registry (writes ~/.npmrc). No long-lived
+  secrets. Requires `id-token: write` on the calling job.
+
+inputs:
+  artifactory-url:
+    description: 'Artifactory base URL (e.g. https://twilio.jfrog.io). Falls back to the ARTIFACTORY_URL env var.'
+    required: false
+    default: ''
+  registry-path:
+    description: 'Artifactory npm virtual repo path used for the registry + auth line.'
+    required: false
+    default: 'virtual-npm-thirdparty'
+  provider-name:
+    description: 'JFrog OIDC provider name (must match the JFrog OIDC configuration).'
+    required: false
+    default: 'github-actions'
+
+runs:
+  using: composite
+  steps:
+    - name: Exchange OIDC token for Artifactory token
+      shell: bash
+      env:
+        INPUT_URL: ${{ inputs.artifactory-url }}
+        REGISTRY_PATH: ${{ inputs.registry-path }}
+        PROVIDER_NAME: ${{ inputs.provider-name }}
+      run: |
+        ARTIFACTORY_URL="${INPUT_URL:-${ARTIFACTORY_URL:-}}"
+        if [ -z "$ARTIFACTORY_URL" ]; then
+          echo "::error::set the artifactory-url input or the ARTIFACTORY_URL env var (usually \${{ vars.ARTIFACTORY_URL }})"
+          exit 1
+        fi
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::error::no OIDC token available — the calling job needs 'permissions: id-token: write'"
+          exit 1
+        fi
+
+        # 1. Request a GitHub JWT scoped to Artifactory as the audience.
+        GITHUB_JWT=$(curl -sS \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
+          | jq -r '.value')
+
+        PAYLOAD=$(echo "$GITHUB_JWT" | cut -d. -f2 | sed 's/-/+/g; s/_/\//g' | base64 -d 2>/dev/null || true)
+        echo "::debug::OIDC claims: sub=$(echo "$PAYLOAD" | jq -r '.sub'), aud=$(echo "$PAYLOAD" | jq -r '.aud')"
+
+        # 2. Exchange the GitHub JWT for an Artifactory access token.
+        RESP=$(curl -sS "${ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+          -H 'Content-Type: application/json' \
+          -d "{\"grant_type\":\"urn:ietf:params:oauth:grant-type:token-exchange\",
+               \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
+               \"subject_token\":\"${GITHUB_JWT}\",
+               \"provider_name\":\"${PROVIDER_NAME}\"}")
+        ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+
+        if [ -z "$ART_TOKEN" ]; then
+          echo "::error::OIDC token exchange failed. Raw response (token field redacted):"
+          echo "$RESP" | jq 'if .access_token then .access_token="<redacted>" else . end' 2>/dev/null || echo "$RESP"
+          exit 1
+        fi
+        echo "::add-mask::$ART_TOKEN"
+
+        # 3. Point npm/yarn(classic)/pnpm at the curated Artifactory registry.
+        #    (yarn Berry reads .yarnrc.yml, not ~/.npmrc — set npmRegistryServer there.)
+        REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/${REGISTRY_PATH}/"
+        HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
+        {
+          echo "registry=${REGISTRY}"
+          echo "//${HOST}/artifactory/api/npm/${REGISTRY_PATH}/:_authToken=${ART_TOKEN}"
+        } > ~/.npmrc
+        echo "::notice::npm configured to use Artifactory registry (${REGISTRY})"
