@@ -44,12 +44,17 @@ runs:
         # internal GHE, other private registries) fails the gate.
         ALLOW='registry\.npmjs\.org|registry\.yarnpkg\.com|github\.com|codeload\.github\.com'
         [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+        # Only inspect URLs that actually decide where a dep is fetched from —
+        # the resolved/registry/tarball/npmRegistryServer keys. NOT funding,
+        # homepage, or repository metadata (those legitimately point anywhere).
+        KEYS='(resolved|registry|tarball|npmRegistryServer)'
         BAD=""
         FOUND=0
         while IFS= read -r f; do
           [ -f "$f" ] || continue
           FOUND=1
-          HOSTS=$(grep -oE 'https?://[^"'\'' ),]+' "$f" 2>/dev/null \
+          HOSTS=$(grep -oE "\"?${KEYS}\"?[[:space:]]*[:=]?[[:space:]]*\"?https?://[^\"' ,)}]+" "$f" 2>/dev/null \
+            | grep -oE 'https?://[^"'\'' ,)}]+' \
             | sed -E 's#^(https?://[^/]+).*#\1#' | sort -u)
           for h in $HOSTS; do
             echo "$h" | grep -qE "://($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
