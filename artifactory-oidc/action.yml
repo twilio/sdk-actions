@@ -6,9 +6,9 @@ description: >-
 
 inputs:
   artifactory-url:
-    description: 'Artifactory base URL (e.g. https://twilio.jfrog.io). Falls back to the ARTIFACTORY_URL env var.'
+    description: 'Artifactory base URL. Defaults to the public pull-through cache; override for a different host.'
     required: false
-    default: ''
+    default: 'https://twilio.jfrog.io'
   registry-path:
     description: 'Artifactory npm virtual repo path used for the registry + auth line.'
     required: false

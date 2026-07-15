@@ -51,8 +51,6 @@ jobs:
       # Forks have no Artifactory secret; skip login and resolve from public npm.
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: twilio/sdk-actions/artifactory-oidc@<sha>  # v1.2.3
-        with:
-          artifactory-url: ${{ vars.ARTIFACTORY_URL }}
       - uses: actions/setup-node@<sha>        # v6
         with: { node-version: '${{ matrix.node }}', cache: yarn }
       - run: yarn install --frozen-lockfile
@@ -79,7 +77,6 @@ jobs:
     steps:
       - uses: actions/checkout@<sha>           # v4
       - uses: twilio/sdk-actions/artifactory-oidc@<sha>  # v1.2.3
-        with: { artifactory-url: '${{ vars.ARTIFACTORY_URL }}' }
       - uses: actions/setup-node@<sha>         # v6 — Node >= 24 for trusted publishing
         with: { node-version: 24, registry-url: 'https://registry.npmjs.org' }
       - run: npm ci --ignore-scripts
@@ -98,7 +95,6 @@ via the env var Lerna passes through to npm:
 
 ```yaml
       - uses: twilio/sdk-actions/artifactory-oidc@<sha>  # v1.2.3
-        with: { artifactory-url: '${{ vars.ARTIFACTORY_URL }}' }
       - run: npx lerna publish from-package --yes
         env:
           npm_config_provenance: 'true'        # false on private repos
@@ -109,6 +105,8 @@ via the env var Lerna passes through to npm:
 ## Notes that bite
 
 - **`id-token: write`** must be on any job using `artifactory-oidc` or `npm-publish`.
+- **`artifactory-url`** defaults to `https://twilio.jfrog.io` — no need to set it;
+  pass the input only to override the host.
 - **Publish env is `production`** — the GitHub Environment, the `environment:` in
   your workflow, and the npm trusted-publisher registration must all say
   `production`, or OIDC publish fails. (The IPD "npm" reference is stale.)
