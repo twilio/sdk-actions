@@ -1,0 +1,3 @@
+# These actions are org-referenced CI/publish guards — changes here affect
+# every consuming SDK repo. Require review from the owning team.
+* @twilio/secure-supply-chain

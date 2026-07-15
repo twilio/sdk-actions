@@ -1,0 +1,109 @@
+name: 'npm lockfile hygiene'
+description: >-
+  ADR 1634 Rule 3b gate. (1) Scan tracked lockfiles/resolver configs and fail
+  closed on any non-public registry host; (2) optionally prove the committed
+  lockfile installs from PUBLIC registries only. Secret-less — safe on forks.
+  Drop into its OWN job for a true clean room.
+
+inputs:
+  package-manager:
+    description: 'npm | yarn | pnpm (drives corepack + default clean-room install).'
+    required: false
+    default: 'npm'
+  install-command:
+    description: 'Clean-room install command; empty = derive from package-manager.'
+    required: false
+    default: ''
+  scan:
+    description: 'Run the non-public-host scan.'
+    required: false
+    default: 'true'
+  clean-room:
+    description: 'Run the public-only install to prove external installability.'
+    required: false
+    default: 'true'
+  allow-hosts:
+    description: 'Extra registry hosts to allow, pipe-separated regex (e.g. registry\.example\.com).'
+    required: false
+    default: ''
+  node-version:
+    description: 'Node version for the clean-room install.'
+    required: false
+    default: '24'
+
+runs:
+  using: composite
+  steps:
+    - name: Scan lockfiles/configs for non-public registry hosts
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      env:
+        EXTRA_ALLOW: ${{ inputs.allow-hosts }}
+      run: |
+        # Hosts an external consumer can reach. Anything else (Twilio Artifactory,
+        # internal GHE, other private registries) fails the gate.
+        ALLOW='registry\.npmjs\.org|registry\.yarnpkg\.com|github\.com|codeload\.github\.com'
+        [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+        # Only inspect URLs that actually decide where a dep is fetched from —
+        # the resolved/registry/tarball/npmRegistryServer keys. NOT funding,
+        # homepage, or repository metadata (those legitimately point anywhere).
+        KEYS='(resolved|registry|tarball|npmRegistryServer)'
+        BAD=""
+        FOUND=0
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          FOUND=1
+          HOSTS=$(grep -oE "\"?${KEYS}\"?[[:space:]]*[:=]?[[:space:]]*\"?https?://[^\"' ,)}]+" "$f" 2>/dev/null \
+            | grep -oE 'https?://[^"'\'' ,)}]+' \
+            | sed -E 's#^(https?://[^/]+).*#\1#' | sort -u)
+          for h in $HOSTS; do
+            echo "$h" | grep -qE "://($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
+          done
+        done < <(git ls-files \
+          '*package-lock.json' '*npm-shrinkwrap.json' '*yarn.lock' '*pnpm-lock.yaml' \
+          '.npmrc' '**/.npmrc' '.yarnrc.yml' '**/.yarnrc.yml' 2>/dev/null)
+        if [ "$FOUND" -eq 0 ]; then
+          echo "::notice::no lockfiles or resolver configs tracked; nothing to scan"
+        elif [ -n "$BAD" ]; then
+          echo "::error::Non-public registry hosts found; external consumers cannot install. Rewrite these to registry.npmjs.org:"
+          printf '%s' "$BAD"
+          exit 1
+        else
+          echo "::notice::lockfile scan OK — all resolved hosts are public"
+        fi
+
+    - name: Enable corepack
+      if: ${{ inputs.clean-room == 'true' && (inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm') }}
+      shell: bash
+      run: corepack enable
+
+    - name: Set up Node (public registry)
+      if: ${{ inputs.clean-room == 'true' }}
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        registry-url: https://registry.npmjs.org
+        cache: ${{ inputs.package-manager }}
+
+    - name: Clean-room public install
+      if: ${{ inputs.clean-room == 'true' }}
+      shell: bash
+      env:
+        PM: ${{ inputs.package-manager }}
+        INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        # Force public registry and fail fast rather than hang on an unreachable host.
+        npm_config_registry: https://registry.npmjs.org/
+        npm_config_fetch_retries: '1'
+        npm_config_fetch_timeout: '60000'
+      run: |
+        if [ -n "$INSTALL_OVERRIDE" ]; then
+          eval "$INSTALL_OVERRIDE"
+        else
+          case "$PM" in
+            npm)  npm ci --ignore-scripts ;;
+            yarn) yarn install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
+          esac
+        fi
+        echo "::notice::clean-room public install succeeded"

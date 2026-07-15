@@ -1,0 +1,90 @@
+name: 'Publish to npm (trusted publishing)'
+description: >-
+  Validate the release tag against package.json, then publish to PUBLIC npm via
+  OIDC trusted publishing. Prereleases go to the `next` dist-tag. Requires
+  `id-token: write` on the calling job and Node >= 24 (npm >= 11.5.1). Assumes
+  the package is already built. For Lerna monorepos, run `lerna publish` yourself
+  with npm_config_provenance instead of this action.
+
+inputs:
+  tag-prefix:
+    description: "Release tag prefix; 'v' for v1.2.3, empty for un-prefixed 1.2.3."
+    required: false
+    default: 'v'
+  validate-tag:
+    description: 'Require the release tag to match package.json version before publishing.'
+    required: false
+    default: 'true'
+  provenance:
+    description: 'Attach npm provenance. MUST be false on private (twilio-internal/*) source repos.'
+    required: false
+    default: 'true'
+  access:
+    description: 'npm access level.'
+    required: false
+    default: 'public'
+  registry:
+    description: 'Publish registry.'
+    required: false
+    default: 'https://registry.npmjs.org'
+  package-dir:
+    description: 'Directory containing package.json to publish from.'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Validate tag format and version match
+      if: ${{ inputs.validate-tag == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.package-dir }}
+      env:
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+      run: |
+        if [ "${GITHUB_REF#refs/tags/}" = "$GITHUB_REF" ]; then
+          echo "::error::validate-tag is on but this run was not triggered by a tag/release (GITHUB_REF=$GITHUB_REF)"
+          exit 1
+        fi
+        TAG="${GITHUB_REF#refs/tags/}"
+        if [ -n "$TAG_PREFIX" ]; then
+          RE="^${TAG_PREFIX}[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+        else
+          RE="^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$"
+        fi
+        if [[ ! "$TAG" =~ $RE ]]; then
+          echo "::error::Release tag '$TAG' must match ${TAG_PREFIX}1.2.3 or ${TAG_PREFIX}1.2.3-rc.1"
+          exit 1
+        fi
+        VERSION="${TAG#$TAG_PREFIX}"
+        PKG_VERSION=$(node -p "require('./package.json').version")
+        if [ "$VERSION" != "$PKG_VERSION" ]; then
+          echo "::error::Tag $TAG (version $VERSION) does not match package.json version $PKG_VERSION"
+          exit 1
+        fi
+
+    - name: Publish to npm
+      # Publishes to PUBLIC npm via OIDC trusted publishing. Prereleases
+      # (e.g. v1.2.3-rc.1) go to the `next` dist-tag instead of `latest`.
+      shell: bash
+      working-directory: ${{ inputs.package-dir }}
+      env:
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        PROVENANCE: ${{ inputs.provenance }}
+        ACCESS: ${{ inputs.access }}
+        REGISTRY: ${{ inputs.registry }}
+      run: |
+        ARGS=(--registry "$REGISTRY" --ignore-scripts --access "$ACCESS")
+        if [ "$PROVENANCE" = "true" ]; then
+          ARGS+=(--provenance)
+        fi
+        # Derive the dist-tag from the release tag when available; a prerelease
+        # (version contains a hyphen) publishes to `next`, not `latest`.
+        REF_TAG="${GITHUB_REF#refs/tags/}"
+        if [ "$REF_TAG" != "$GITHUB_REF" ]; then
+          VERSION="${REF_TAG#$TAG_PREFIX}"
+          if [[ "$VERSION" == *-* ]]; then
+            ARGS+=(--tag next)
+          fi
+        fi
+        npm publish "${ARGS[@]}"
