@@ -1,3 +1,4 @@
+# Copyright 2026 Twilio Inc.
 name: 'Artifactory OIDC login'
 description: >-
   Exchange the GitHub Actions OIDC token for a short-lived Artifactory access

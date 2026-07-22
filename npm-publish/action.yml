@@ -1,3 +1,4 @@
+# Copyright 2026 Twilio Inc.
 name: 'Publish to npm (trusted publishing)'
 description: >-
   Validate the release tag against package.json, then publish to PUBLIC npm via
@@ -16,7 +17,7 @@ inputs:
     required: false
     default: 'true'
   provenance:
-    description: 'Attach npm provenance. MUST be false on private (twilio-internal/*) source repos.'
+    description: 'Attach npm provenance. MUST be false on private/internal source repos (npm rejects provenance from them).'
     required: false
     default: 'true'
   access:
