@@ -1,4 +1,3 @@
-# Copyright 2026 Twilio Inc.
 name: 'npm lockfile hygiene'
 description: >-
   Supply-chain gate for public npm packages. (1) Scan tracked lockfiles/resolver

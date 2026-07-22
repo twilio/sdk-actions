@@ -91,10 +91,9 @@ After your pull request is merged, you can safely delete your branch.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the
-[MIT License](LICENSE) that covers this project. All third party contributors
-acknowledge that any contributions they provide will be made under the same open
-source license that the open source project is provided under.
+All third party contributors acknowledge that any contributions they provide
+will be made under the same open source license that the open source project is
+provided under.
 
 [github]: https://github.com/twilio/sdk-actions
 [pulls]: https://github.com/twilio/sdk-actions/pulls

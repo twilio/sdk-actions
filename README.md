@@ -124,4 +124,3 @@ major.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and our [Code of Conduct](CODE_OF_CONDUCT.md).
-Licensed under [MIT](LICENSE).

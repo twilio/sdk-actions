@@ -1,4 +1,3 @@
-# Copyright 2026 Twilio Inc.
 name: 'Publish to npm (trusted publishing)'
 description: >-
   Validate the release tag against package.json, then publish to PUBLIC npm via
