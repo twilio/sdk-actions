@@ -1,18 +1,24 @@
 name: 'Artifactory OIDC login'
 description: >-
   Exchange the GitHub Actions OIDC token for a short-lived Artifactory access
-  token and point npm at the curated registry (writes ~/.npmrc). No long-lived
-  secrets. Requires `id-token: write` on the calling job.
+  token and point your package manager at the curated registry. For `npm` this
+  writes ~/.npmrc; for `python` it exports UV_INDEX_URL / PIP_INDEX_URL so uv and
+  pip resolve through Artifactory. No long-lived secrets. Requires
+  `id-token: write` on the calling job.
 
 inputs:
+  ecosystem:
+    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc) or 'python' (exports UV_INDEX_URL / PIP_INDEX_URL)."
+    required: false
+    default: 'npm'
   artifactory-url:
     description: 'Artifactory base URL. Defaults to the public pull-through cache; override for a different host.'
     required: false
     default: 'https://twilio.jfrog.io'
   registry-path:
-    description: 'Artifactory npm virtual repo path used for the registry + auth line.'
+    description: 'Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty).'
     required: false
-    default: 'virtual-npm-thirdparty'
+    default: ''
   provider-name:
     description: 'JFrog OIDC provider name (must match the JFrog OIDC configuration).'
     required: false
@@ -24,6 +30,7 @@ runs:
     - name: Exchange OIDC token for Artifactory token
       shell: bash
       env:
+        ECOSYSTEM: ${{ inputs.ecosystem }}
         INPUT_URL: ${{ inputs.artifactory-url }}
         REGISTRY_PATH: ${{ inputs.registry-path }}
         PROVIDER_NAME: ${{ inputs.provider-name }}
@@ -36,6 +43,15 @@ runs:
         if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
           echo "::error::no OIDC token available — the calling job needs 'permissions: id-token: write'"
           exit 1
+        fi
+
+        # Per-ecosystem default for the virtual repo path.
+        if [ -z "$REGISTRY_PATH" ]; then
+          case "$ECOSYSTEM" in
+            npm)    REGISTRY_PATH='virtual-npm-thirdparty' ;;
+            python) REGISTRY_PATH='virtual-pypi-thirdparty' ;;
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm' or 'python')"; exit 1 ;;
+          esac
         fi
 
         # 1. Request a GitHub JWT scoped to Artifactory as the audience.
@@ -63,12 +79,27 @@ runs:
         fi
         echo "::add-mask::$ART_TOKEN"
 
-        # 3. Point npm/yarn(classic)/pnpm at the curated Artifactory registry.
-        #    (yarn Berry reads .yarnrc.yml, not ~/.npmrc — set npmRegistryServer there.)
-        REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/${REGISTRY_PATH}/"
+        # 3. Point the package manager at the curated Artifactory registry.
         HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
-        {
-          echo "registry=${REGISTRY}"
-          echo "//${HOST}/artifactory/api/npm/${REGISTRY_PATH}/:_authToken=${ART_TOKEN}"
-        } > ~/.npmrc
-        echo "::notice::npm configured to use Artifactory registry (${REGISTRY})"
+        case "$ECOSYSTEM" in
+          npm)
+            # npm/yarn(classic)/pnpm read ~/.npmrc.
+            # (yarn Berry reads .yarnrc.yml — set npmRegistryServer there instead.)
+            REGISTRY="${ARTIFACTORY_URL}/artifactory/api/npm/${REGISTRY_PATH}/"
+            {
+              echo "registry=${REGISTRY}"
+              echo "//${HOST}/artifactory/api/npm/${REGISTRY_PATH}/:_authToken=${ART_TOKEN}"
+            } > ~/.npmrc
+            echo "::notice::npm configured to use Artifactory registry (${REGISTRY})"
+            ;;
+          python)
+            # JFrog access tokens authenticate as a Bearer token, NOT as basic auth
+            # with username "token" (that returns 401). pip/uv index URLs use HTTP
+            # basic auth, so present the token as the PASSWORD with an EMPTY username.
+            INDEX_URL="https://:${ART_TOKEN}@${HOST}/artifactory/api/pypi/${REGISTRY_PATH}/simple/"
+            echo "::add-mask::${INDEX_URL}"
+            echo "UV_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
+            echo "PIP_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
+            echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
+            ;;
+        esac
