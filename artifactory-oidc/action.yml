@@ -30,7 +30,7 @@ runs:
       run: |
         ARTIFACTORY_URL="${INPUT_URL:-${ARTIFACTORY_URL:-}}"
         if [ -z "$ARTIFACTORY_URL" ]; then
-          echo "::error::set the artifactory-url input or the ARTIFACTORY_URL env var (usually \${{ vars.ARTIFACTORY_URL }})"
+          echo "::error::set the artifactory-url input or the ARTIFACTORY_URL env var (usually the vars.ARTIFACTORY_URL repo variable)"
           exit 1
         fi
         if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
