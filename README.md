@@ -1,15 +1,9 @@
 # sdk-actions
 
-Small, composable GitHub Actions for the concerns the SDK platform team owns:
-**Artifactory OIDC login**, **lockfile hygiene**, and **publishing**. Teams keep
-their own `ci.yml` / `publish.yml` and drop these in as steps — no black-box
-pipeline to adopt.
-
-Implements the **build-public, gate-internal, publish-public** pattern from
-**ADR 1634** (Rule 3b delivery). Tracked in **PEA-1331**.
-
-> This repo is `internal`-visibility with Actions access open to the `twilio`
-> org, so public `twilio/*` repos can `uses:` these actions.
+Small, composable GitHub Actions for building and publishing Twilio's public
+npm SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
+Drop them into your own `ci.yml` / `publish.yml` as steps — there is no
+black-box pipeline to adopt.
 
 ## The three actions
 
@@ -39,7 +33,7 @@ jobs:
           package-manager: yarn               # npm | yarn | pnpm
 
   test:
-    # Fork PRs -> GitHub-hosted; org PRs -> internal Artifactory runner. Your call.
+    # Fork PRs -> GitHub-hosted; internal PRs -> your self-hosted runner. Your call.
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     permissions:
       contents: read
@@ -69,7 +63,7 @@ on: { release: { types: [published] } }
 jobs:
   publish:
     runs-on: ubuntu-x64
-    if: github.repository_owner == 'twilio'    # or 'twilio-internal'
+    if: github.repository_owner == 'twilio'    # your GitHub org
     environment: production                    # gates the publish; see note below
     permissions:
       contents: read
@@ -84,7 +78,7 @@ jobs:
       - uses: twilio/sdk-actions/npm-publish@<sha> # v1.2.3
         with:
           # tag-prefix: ''      # un-prefixed tags like 2.18.3
-          # provenance: false   # REQUIRED for private (twilio-internal/*) sources
+          # provenance: false   # REQUIRED for private/internal source repos
 ```
 
 ## Lerna monorepos
@@ -109,7 +103,7 @@ via the env var Lerna passes through to npm:
   pass the input only to override the host.
 - **Publish env is `production`** — the GitHub Environment, the `environment:` in
   your workflow, and the npm trusted-publisher registration must all say
-  `production`, or OIDC publish fails. (The IPD "npm" reference is stale.)
+  `production`, or OIDC publish fails.
 - **Node ≥ 24** for the publish job (npm ≥ 11.5.1 for OIDC trusted publishing).
 - **Private repos**: `provenance: false` — npm rejects provenance from private
   sources even for public packages.
@@ -118,25 +112,15 @@ via the env var Lerna passes through to npm:
 
 ## Versioning & pinning
 
-> **Org policy: SHA-pin.** `@v1`-style tags on `uses:` are rejected org-wide.
-> Pin a full commit SHA with the version in a trailing comment:
+> **Pin a full commit SHA**, with the version in a trailing comment — not a
+> moving tag. This is the recommended supply-chain practice for third-party
+> actions:
 > `uses: twilio/sdk-actions/npm-publish@<40-char-sha>  # v1.2.3`
 
-Released as `vMAJOR.MINOR.PATCH` via GitHub Releases (following the
-`twilio-internal/github-actions-library` precedent). Dependabot bumps the SHA in
-consumer repos.
+Released as `vMAJOR.MINOR.PATCH` via GitHub Releases; a matching `vMAJOR` tag
+moves to the latest compatible release. Breaking input/behavior changes bump the
+major.
 
-## Enforcement (PEA-1331)
+## Contributing
 
-Composable actions are opt-in, so a repo *could* omit `npm-lockfile-hygiene`. To make
-the gate un-weakenable, it's wired as an **org-level required check** (ruleset) —
-tracked as a follow-up below.
-
-## Adoption status
-
-- [x] Composable actions: `artifactory-oidc`, `npm-lockfile-hygiene`, `npm-publish` (npm/yarn/pnpm, single + Lerna).
-- [ ] Rewrite the IPD onboarding doc to reference these actions instead of copied bash.
-- [ ] Adopt across the SDK repos (typescript / python / aws / microsoft).
-- [ ] Org-level required check (ruleset) for `npm-lockfile-hygiene`.
-- [ ] Python/PyPI equivalents (PEA-1325).
-- [ ] Roll out across orgs: `twilio`, `twilio-internal`, `segmentio`, `sendgrid`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and our [Code of Conduct](CODE_OF_CONDUCT.md).

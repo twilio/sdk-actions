@@ -16,7 +16,7 @@ inputs:
     required: false
     default: 'true'
   provenance:
-    description: 'Attach npm provenance. MUST be false on private (twilio-internal/*) source repos.'
+    description: 'Attach npm provenance. MUST be false on private/internal source repos (npm rejects provenance from them).'
     required: false
     default: 'true'
   access:

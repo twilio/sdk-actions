@@ -1,9 +1,9 @@
 name: 'npm lockfile hygiene'
 description: >-
-  ADR 1634 Rule 3b gate. (1) Scan tracked lockfiles/resolver configs and fail
-  closed on any non-public registry host; (2) optionally prove the committed
-  lockfile installs from PUBLIC registries only. Secret-less — safe on forks.
-  Drop into its OWN job for a true clean room.
+  Supply-chain gate for public npm packages. (1) Scan tracked lockfiles/resolver
+  configs and fail closed on any non-public registry host; (2) optionally prove
+  the committed lockfile installs from PUBLIC registries only. Secret-less — safe
+  on forks. Drop into its OWN job for a true clean room.
 
 inputs:
   package-manager:
