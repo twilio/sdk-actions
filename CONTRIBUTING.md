@@ -9,7 +9,6 @@ they are today! Here are the guidelines we'd like you to follow:
 - [Want a Feature?](#want-a-feature)
 - [Submission Guidelines](#submission-guidelines)
 - [Coding Rules](#coding-rules)
-- [License](#license)
 
 ## Code of Conduct
 
@@ -88,12 +87,6 @@ After your pull request is merged, you can safely delete your branch.
   and reference them as `"$VAR"`.
 - **Test against a consumer** — validate a change by pointing a real (or test)
   consumer workflow at your branch SHA and confirming the run behaves as expected.
-
-## License
-
-All third party contributors acknowledge that any contributions they provide
-will be made under the same open source license that the open source project is
-provided under.
 
 [github]: https://github.com/twilio/sdk-actions
 [pulls]: https://github.com/twilio/sdk-actions/pulls
