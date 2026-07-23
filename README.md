@@ -1,16 +1,17 @@
 # sdk-actions
 
 Small, composable GitHub Actions for building and publishing Twilio's public
-npm SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
+SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
 Drop them into your own `ci.yml` / `publish.yml` as steps — there is no
-black-box pipeline to adopt.
+black-box pipeline to adopt. `lockfile-hygiene` works for npm / yarn / pnpm and
+uv (Python); `npm-publish` is npm-specific.
 
 ## The three actions
 
 | Action | What it does |
 |--------|--------------|
 | [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points npm at the curated registry (`~/.npmrc`). No stored secret. |
-| [`npm-lockfile-hygiene`](npm-lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
+| [`lockfile-hygiene`](lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. npm / yarn / pnpm / uv. Secret-less — safe on forks. |
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 
 Each is a **drop-in step** — you own the runner, matrix, lint, build, and test.
@@ -24,13 +25,13 @@ on: { push: { branches: [main] }, pull_request: {}, workflow_dispatch: {} }
 
 jobs:
   # Secret-less gate — its own job so the clean-room install is truly isolated.
-  npm-lockfile-hygiene:
+  lockfile-hygiene:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>          # v4
-      - uses: twilio/sdk-actions/npm-lockfile-hygiene@<sha>  # v1.2.3
+      - uses: twilio/sdk-actions/lockfile-hygiene@<sha>  # v1.2.3
         with:
-          package-manager: yarn               # npm | yarn | pnpm
+          package-manager: yarn               # npm | yarn | pnpm | uv
 
   test:
     # Fork PRs -> GitHub-hosted; internal PRs -> your self-hosted runner. Your call.
@@ -51,6 +52,20 @@ jobs:
       - run: yarn lint
       - run: yarn build
       - run: yarn test
+```
+
+For a **Python (uv)** SDK, point the same action at uv — it scans `uv.lock` /
+`requirements*.txt` and clean-room installs with `uv sync --frozen` from public
+PyPI:
+
+```yaml
+  lockfile-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      - uses: twilio/sdk-actions/lockfile-hygiene@<sha>  # v1.2.3
+        with:
+          package-manager: uv
 ```
 
 ## Compose them: Publish (single package)
@@ -83,7 +98,7 @@ jobs:
 
 ## Lerna monorepos
 
-Compose `artifactory-oidc` + `npm-lockfile-hygiene` as above; for the publish step,
+Compose `artifactory-oidc` + `lockfile-hygiene` as above; for the publish step,
 run Lerna yourself (the `npm-publish` action is single-package). Toggle provenance
 via the env var Lerna passes through to npm:
 

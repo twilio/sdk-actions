@@ -1,0 +1,161 @@
+name: 'lockfile hygiene'
+description: >-
+  Supply-chain gate for public SDK packages. (1) Scan tracked lockfiles/resolver
+  configs and fail closed on any non-public registry host; (2) optionally prove
+  the committed lockfile installs from PUBLIC registries only. Works for npm /
+  yarn / pnpm (Node) and uv (Python). Secret-less — safe on forks. Drop into its
+  OWN job for a true clean room.
+
+inputs:
+  package-manager:
+    description: 'npm | yarn | pnpm | uv (drives the scan targets + default clean-room install).'
+    required: false
+    default: 'npm'
+  install-command:
+    description: 'Clean-room install command; empty = derive from package-manager.'
+    required: false
+    default: ''
+  scan:
+    description: 'Run the non-public-host scan.'
+    required: false
+    default: 'true'
+  clean-room:
+    description: 'Run the public-only install to prove external installability.'
+    required: false
+    default: 'true'
+  allow-hosts:
+    description: 'Extra registry hosts to allow, pipe-separated regex (e.g. registry\.example\.com).'
+    required: false
+    default: ''
+  node-version:
+    description: 'Node version for the clean-room install (Node package managers).'
+    required: false
+    default: '24'
+  python-version:
+    description: 'Python version for the clean-room install (uv).'
+    required: false
+    default: '3.12'
+
+runs:
+  using: composite
+  steps:
+    - name: Scan lockfiles/configs for non-public registry hosts
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      env:
+        PM: ${{ inputs.package-manager }}
+        EXTRA_ALLOW: ${{ inputs.allow-hosts }}
+      run: |
+        # github.com / codeload are allowed everywhere — git deps legitimately
+        # resolve there. Anything else (Twilio Artifactory, internal GHE, other
+        # private registries) fails the gate.
+        GIT_HOSTS='github\.com|codeload\.github\.com'
+        BAD=""
+        FOUND=0
+
+        case "$PM" in
+          npm|yarn|pnpm)
+            ALLOW="registry\.npmjs\.org|registry\.yarnpkg\.com|${GIT_HOSTS}"
+            [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+            # Only inspect URLs that actually decide where a dep is fetched from —
+            # the resolved/registry/tarball/npmRegistryServer keys. NOT funding,
+            # homepage, or repository metadata (those legitimately point anywhere).
+            KEYS='(resolved|registry|tarball|npmRegistryServer)'
+            while IFS= read -r f; do
+              [ -f "$f" ] || continue
+              FOUND=1
+              HOSTS=$(grep -oE "\"?${KEYS}\"?[[:space:]]*[:=]?[[:space:]]*\"?https?://[^\"' ,)}]+" "$f" 2>/dev/null \
+                | grep -oE 'https?://[^"'\'' ,)}]+' \
+                | sed -E 's#^(https?://[^/]+).*#\1#' | sort -u)
+              for h in $HOSTS; do
+                echo "$h" | grep -qE "://($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
+              done
+            done < <(git ls-files \
+              '*package-lock.json' '*npm-shrinkwrap.json' '*yarn.lock' '*pnpm-lock.yaml' \
+              '.npmrc' '**/.npmrc' '.yarnrc.yml' '**/.yarnrc.yml' 2>/dev/null)
+            ;;
+          uv)
+            ALLOW="pypi\.org|files\.pythonhosted\.org|${GIT_HOSTS}"
+            [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+            # uv.lock / requirements files only carry fetch URLs (index + sdist/
+            # wheel downloads, --index-url lines) — no metadata noise — so extract
+            # every host and check it, rather than keying on field names.
+            while IFS= read -r f; do
+              [ -f "$f" ] || continue
+              FOUND=1
+              HOSTS=$(grep -oE 'https?://[^"'\'' ,)}]+' "$f" 2>/dev/null \
+                | sed -E 's#^(https?://[^/]+).*#\1#' | sort -u)
+              for h in $HOSTS; do
+                echo "$h" | grep -qE "://($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
+              done
+            done < <(git ls-files \
+              '*uv.lock' '*requirements*.txt' 2>/dev/null)
+            ;;
+          *)
+            echo "::error::unknown package-manager '$PM' (expected npm | yarn | pnpm | uv)"
+            exit 1
+            ;;
+        esac
+
+        if [ "$FOUND" -eq 0 ]; then
+          echo "::notice::no lockfiles or resolver configs tracked; nothing to scan"
+        elif [ -n "$BAD" ]; then
+          echo "::error::Non-public registry hosts found; external consumers cannot install. Rewrite these to the public registry:"
+          printf '%s' "$BAD"
+          exit 1
+        else
+          echo "::notice::lockfile scan OK — all resolved hosts are public"
+        fi
+
+    # --- Node clean room (npm / yarn / pnpm) ---
+    - name: Enable corepack
+      if: ${{ inputs.clean-room == 'true' && (inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm') }}
+      shell: bash
+      run: corepack enable
+
+    - name: Set up Node (public registry)
+      if: ${{ inputs.clean-room == 'true' && (inputs.package-manager == 'npm' || inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm') }}
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        registry-url: https://registry.npmjs.org
+        cache: ${{ inputs.package-manager }}
+
+    # --- Python clean room (uv) ---
+    - name: Set up Python
+      if: ${{ inputs.clean-room == 'true' && inputs.package-manager == 'uv' }}
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up uv
+      if: ${{ inputs.clean-room == 'true' && inputs.package-manager == 'uv' }}
+      uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5
+
+    - name: Clean-room public install
+      if: ${{ inputs.clean-room == 'true' }}
+      shell: bash
+      env:
+        PM: ${{ inputs.package-manager }}
+        INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        # Force the public registry and fail fast rather than hang on an
+        # unreachable host. npm_config_* are ignored by uv; UV_INDEX_URL /
+        # PIP_INDEX_URL are ignored by npm — set both, let each PM read its own.
+        npm_config_registry: https://registry.npmjs.org/
+        npm_config_fetch_retries: '1'
+        npm_config_fetch_timeout: '60000'
+        UV_INDEX_URL: https://pypi.org/simple
+        PIP_INDEX_URL: https://pypi.org/simple
+      run: |
+        if [ -n "$INSTALL_OVERRIDE" ]; then
+          eval "$INSTALL_OVERRIDE"
+        else
+          case "$PM" in
+            npm)  npm ci --ignore-scripts ;;
+            yarn) yarn install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            uv)   uv sync --frozen ;;
+            *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
+          esac
+        fi
+        echo "::notice::clean-room public install succeeded"
