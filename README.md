@@ -1,16 +1,18 @@
 # sdk-actions
 
 Small, composable GitHub Actions for building and publishing Twilio's public
-npm SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
+SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
 Drop them into your own `ci.yml` / `publish.yml` as steps — there is no
-black-box pipeline to adopt.
+black-box pipeline to adopt. `artifactory-oidc` and lockfile hygiene cover both
+npm and Python (uv); `npm-publish` is npm-specific.
 
-## The three actions
+## The actions
 
 | Action | What it does |
 |--------|--------------|
-| [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points npm at the curated registry (`~/.npmrc`). No stored secret. |
+| [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points your package manager at the curated registry — npm via `~/.npmrc`, or Python (`ecosystem: python`) via `UV_INDEX_URL` / `PIP_INDEX_URL`. No stored secret. |
 | [`npm-lockfile-hygiene`](npm-lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
+| [`uv-lockfile-hygiene`](uv-lockfile-hygiene/action.yml) | Same gate for Python (uv): scans `uv.lock` / `requirements*.txt` and clean-room installs with `uv sync --frozen` from public PyPI. Secret-less — safe on forks. |
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 
 Each is a **drop-in step** — you own the runner, matrix, lint, build, and test.
@@ -51,6 +53,42 @@ jobs:
       - run: yarn lint
       - run: yarn build
       - run: yarn test
+```
+
+## Compose them: CI (Python)
+
+Pass `ecosystem: python` to `artifactory-oidc` (it exports `UV_INDEX_URL` /
+`PIP_INDEX_URL` so `uv sync` / `pip install` resolve through Artifactory), and
+use `uv-lockfile-hygiene` for the supply-chain gate. `npm-publish` is
+npm-specific and doesn't apply.
+
+```yaml
+# .github/workflows/ci.yml — you write and own this
+jobs:
+  # Secret-less gate — its own job so the clean-room install is truly isolated.
+  uv-lockfile-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      - uses: twilio/sdk-actions/uv-lockfile-hygiene@<sha>  # v1.2.3
+
+  test:
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    permissions:
+      contents: read
+      id-token: write                         # needed for the OIDC login below
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      # Forks have no Artifactory secret; skip login and resolve from public PyPI.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@<sha>  # v1.2.3
+        with:
+          ecosystem: python
+      - uses: astral-sh/setup-uv@<sha>        # v5
+      - uses: actions/setup-python@<sha>      # v5
+        with: { python-version: '3.12' }
+      - run: uv sync --frozen --all-extras --all-groups
+      - run: uv run pytest
 ```
 
 ## Compose them: Publish (single package)
@@ -109,6 +147,10 @@ via the env var Lerna passes through to npm:
   sources even for public packages.
 - **yarn Berry** reads `.yarnrc.yml`, not `~/.npmrc`; `artifactory-oidc` writes
   `~/.npmrc` (works for npm / yarn-classic / pnpm). Berry needs extra config.
+- **Python** (`ecosystem: python`): `artifactory-oidc` exports `UV_INDEX_URL` /
+  `PIP_INDEX_URL` into `$GITHUB_ENV` (token as the basic-auth password, empty
+  username — JFrog rejects `token` as the username). It does not touch
+  `~/.npmrc`. Use `uv-lockfile-hygiene` for the gate; `npm-publish` doesn't apply.
 
 ## Versioning & pinning
 

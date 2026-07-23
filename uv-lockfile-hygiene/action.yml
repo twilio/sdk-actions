@@ -1,0 +1,92 @@
+name: 'uv lockfile hygiene'
+description: >-
+  Supply-chain gate for public Python (uv) packages. (1) Scan tracked uv.lock /
+  requirements files and fail closed on any non-public registry host; (2)
+  optionally prove the committed lockfile installs from PUBLIC PyPI only.
+  Secret-less — safe on forks. Drop into its OWN job for a true clean room.
+
+inputs:
+  install-command:
+    description: 'Clean-room install command; empty = `uv sync --frozen`.'
+    required: false
+    default: ''
+  scan:
+    description: 'Run the non-public-host scan.'
+    required: false
+    default: 'true'
+  clean-room:
+    description: 'Run the public-only install to prove external installability.'
+    required: false
+    default: 'true'
+  allow-hosts:
+    description: 'Extra registry hosts to allow, pipe-separated regex (e.g. pypi\.example\.com).'
+    required: false
+    default: ''
+  python-version:
+    description: 'Python version for the clean-room install.'
+    required: false
+    default: '3.12'
+
+runs:
+  using: composite
+  steps:
+    - name: Scan uv.lock / requirements for non-public registry hosts
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      env:
+        EXTRA_ALLOW: ${{ inputs.allow-hosts }}
+      run: |
+        # Hosts an external consumer can reach. github.com is allowed for git
+        # deps; anything else (Twilio Artifactory, other private registries)
+        # fails the gate.
+        ALLOW='pypi\.org|files\.pythonhosted\.org|github\.com|codeload\.github\.com'
+        [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+        # uv.lock / requirements files only carry fetch URLs (index + sdist/wheel
+        # downloads, --index-url lines) — no metadata noise — so extract every
+        # host and check it.
+        BAD=""
+        FOUND=0
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          FOUND=1
+          HOSTS=$(grep -oE 'https?://[^"'\'' ,)}]+' "$f" 2>/dev/null \
+            | sed -E 's#^(https?://[^/]+).*#\1#' | sort -u)
+          for h in $HOSTS; do
+            echo "$h" | grep -qE "://($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
+          done
+        done < <(git ls-files '*uv.lock' '*requirements*.txt' 2>/dev/null)
+        if [ "$FOUND" -eq 0 ]; then
+          echo "::notice::no uv.lock or requirements files tracked; nothing to scan"
+        elif [ -n "$BAD" ]; then
+          echo "::error::Non-public registry hosts found; external consumers cannot install. Rewrite these to pypi.org:"
+          printf '%s' "$BAD"
+          exit 1
+        else
+          echo "::notice::lockfile scan OK — all resolved hosts are public"
+        fi
+
+    - name: Set up Python
+      if: ${{ inputs.clean-room == 'true' }}
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up uv
+      if: ${{ inputs.clean-room == 'true' }}
+      uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5
+
+    - name: Clean-room public install
+      if: ${{ inputs.clean-room == 'true' }}
+      shell: bash
+      env:
+        INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        # Force public PyPI and fail fast rather than hang on an unreachable host.
+        UV_INDEX_URL: https://pypi.org/simple
+        PIP_INDEX_URL: https://pypi.org/simple
+      run: |
+        if [ -n "$INSTALL_OVERRIDE" ]; then
+          eval "$INSTALL_OVERRIDE"
+        else
+          uv sync --frozen
+        fi
+        echo "::notice::clean-room public install succeeded"

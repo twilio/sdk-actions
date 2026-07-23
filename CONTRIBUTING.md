@@ -48,9 +48,9 @@ answered. If your issue looks like a bug and hasn't been reported, open a new
 one. Please include:
 
 - **Overview** — what happened, including any error output from the workflow run
-- **Which action** — `artifactory-oidc`, `npm-lockfile-hygiene`, or `npm-publish`
+- **Which action** — `artifactory-oidc`, `npm-lockfile-hygiene`, `uv-lockfile-hygiene`, or `npm-publish`
 - **Inputs** — the `with:` values you passed (redact secrets)
-- **Environment** — package manager (npm/yarn/pnpm), Node version, runner
+- **Environment** — package manager (npm/yarn/pnpm/uv), Node/Python version, runner
 - **Reproduce** — a link to a failing run or a minimal workflow snippet
 
 ### Submitting a Pull Request
