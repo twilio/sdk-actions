@@ -41,6 +41,9 @@ jobs:
             exit 0
           fi
 
+          # Assumes releases move forward off main. Publishing an OLDER version
+          # after a newer one (e.g. a v1.2.x backport once v1.4.x exists) would
+          # regress the major alias — don't do that; cut a forward patch instead.
           MAJOR="${TAG%%.*}"                 # v1.4.2 -> v1
           SHA="$(git rev-list -n1 "$TAG")"   # the actual tagged commit
 
