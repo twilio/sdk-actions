@@ -1,0 +1,54 @@
+name: Release
+
+# These actions are consumed by SHA pin (see README). A GitHub Release is the
+# only "publish" step — it creates the vX.Y.Z tag on the target commit. This
+# workflow's sole job is to move the floating vMAJOR alias to that commit so
+# consumers tracking @v1 get the latest compatible release.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # push the moving major-version tag
+
+jobs:
+  major-tag:
+    name: Update major-version alias
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'twilio'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0 # need tag history to resolve the release commit
+
+      - name: Validate tag and move the vMAJOR alias
+        # TAG is passed via env: (not interpolated into the script) so a crafted
+        # release name can't inject shell commands.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'
+          if [[ ! "$TAG" =~ $RE ]]; then
+            echo "::error::Release tag '$TAG' must be vMAJOR.MINOR.PATCH (optionally -rc.1)"
+            exit 1
+          fi
+
+          # A prerelease (version contains a hyphen) gets its vX.Y.Z tag but must
+          # NOT move the floating major alias — that stays on the last stable.
+          if [[ "$TAG" == *-* ]]; then
+            echo "Prerelease $TAG — leaving the ${TAG%%.*} alias untouched."
+            exit 0
+          fi
+
+          # Assumes releases move forward off main. Publishing an OLDER version
+          # after a newer one (e.g. a v1.2.x backport once v1.4.x exists) would
+          # regress the major alias — don't do that; cut a forward patch instead.
+          MAJOR="${TAG%%.*}"                 # v1.4.2 -> v1
+          SHA="$(git rev-list -n1 "$TAG")"   # the actual tagged commit
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$MAJOR" "$SHA"
+          git push origin "refs/tags/$MAJOR" --force
+          echo "Moved $MAJOR -> $SHA ($TAG)"
