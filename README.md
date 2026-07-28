@@ -121,7 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@<sha>          # v5
       # setup-php FIRST — artifactory-oidc shells out to `composer`.
-      - uses: shivammathur/setup-php@<sha>    # 2.35.5
+      - uses: shivammathur/setup-php@<sha>    # 2.37.2
         with: { php-version: '${{ matrix.php }}' }
       # Forks have no Artifactory secret; skip login and resolve from public Packagist.
       - if: ${{ !github.event.pull_request.head.repo.fork }}
