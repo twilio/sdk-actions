@@ -1,0 +1,91 @@
+name: 'Semantic PR title'
+description: >-
+  Check that a pull request title follows Conventional Commits
+  (`type(scope)!: subject`). Pure bash — no third-party action, so no org
+  allow-list entry is needed. Run on `pull_request` or `pull_request_target`.
+
+inputs:
+  types:
+    description: 'Allowed types, one per line or comma-separated.'
+    required: false
+    default: |
+      chore
+      docs
+      fix
+      feat
+      misc
+      test
+  require-scope:
+    description: 'Require a (scope) after the type.'
+    required: false
+    default: 'false'
+  subject-min-length:
+    description: 'Minimum subject length after the colon.'
+    required: false
+    default: '3'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        # Via env, never interpolated into the script — a PR title is
+        # attacker-controlled text and must not reach the shell as code.
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        TYPES: ${{ inputs.types }}
+        REQUIRE_SCOPE: ${{ inputs.require-scope }}
+        MIN_LEN: ${{ inputs.subject-min-length }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${PR_TITLE:-}" ]; then
+          echo "::error::no pull request title found — this action needs a 'pull_request' or 'pull_request_target' event"
+          exit 1
+        fi
+
+        # Normalise the type list: commas or newlines -> a | alternation.
+        TYPE_ALT="$(printf '%s' "$TYPES" \
+          | tr ',' '\n' \
+          | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+          | grep -v '^$' \
+          | paste -sd '|' -)"
+        if [ -z "$TYPE_ALT" ]; then
+          echo "::error::the 'types' input is empty"
+          exit 1
+        fi
+
+        if [ "$REQUIRE_SCOPE" = "true" ]; then
+          SCOPE_RE='\([a-z0-9][a-z0-9._/-]*\)'
+        else
+          SCOPE_RE='(\([a-z0-9][a-z0-9._/-]*\))?'
+        fi
+
+        RE="^(${TYPE_ALT})${SCOPE_RE}!?: .{${MIN_LEN},}$"
+
+        if [[ "$PR_TITLE" =~ $RE ]]; then
+          echo "::notice::PR title OK — \"${PR_TITLE}\""
+          exit 0
+        fi
+
+        # Build a diagnosis that says what to fix, not just "invalid".
+        echo "::error::PR title does not follow Conventional Commits: \"${PR_TITLE}\""
+        {
+          echo "Expected:  type(optional-scope): subject"
+          echo "Allowed types: ${TYPE_ALT//|/, }"
+          echo
+          if [[ ! "$PR_TITLE" =~ : ]]; then
+            echo "Problem: no colon. A type and a colon are required, e.g. 'fix: correct retry backoff'."
+          elif [[ "$PR_TITLE" =~ ^([a-zA-Z]+) ]] && \
+               ! [[ "${BASH_REMATCH[1]}" =~ ^(${TYPE_ALT})$ ]]; then
+            echo "Problem: '${BASH_REMATCH[1]}' is not an allowed type."
+          elif [[ "$PR_TITLE" =~ :[^[:space:]] ]]; then
+            echo "Problem: missing the space after the colon ('fix:thing' should be 'fix: thing')."
+          else
+            echo "Problem: the subject is shorter than ${MIN_LEN} characters, or the scope is malformed."
+          fi
+          echo
+          echo "Examples:  feat: add messaging v2 client"
+          echo "           fix(http): retry on 429"
+          echo "           chore!: drop PHP 7.2 support"
+        } >&2
+        exit 1

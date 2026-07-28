@@ -129,6 +129,114 @@ jobs:
           clean-room: 'true'
 
   # ---------------------------------------------------------------------------
+  # semantic-pr-title: table-driven, so both directions are covered — a good
+  # title must pass AND a bad one must fail.
+  # ---------------------------------------------------------------------------
+  semantic-pr-title:
+    name: semantic-pr-title (table)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Valid and invalid titles behave as expected
+        env:
+          TYPES: |
+            chore
+            docs
+            fix
+            feat
+            misc
+            test
+        run: |
+          set -euo pipefail
+          TYPE_ALT="$(printf '%s' "$TYPES" | tr ',' '\n' \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^$' | paste -sd '|' -)"
+          RE="^(${TYPE_ALT})(\([a-z0-9][a-z0-9._/-]*\))?!?: .{3,}\$"
+
+          fail=0
+          assert() { # assert <expected pass|fail> <title>
+            if [[ "$2" =~ $RE ]]; then got=pass; else got=fail; fi
+            if [ "$got" != "$1" ]; then
+              echo "::error::expected $1 but got $got for: $2"; fail=1
+            else
+              echo "  ok ($got) $2"
+            fi
+          }
+
+          assert pass 'fix: correct retry backoff'
+          assert pass 'feat(http): add messaging v2 client'
+          assert pass 'chore!: drop PHP 7.2 support'
+          assert pass 'feat(api)!: breaking change'
+          assert fail 'Fix ScopeURI parsing'
+          assert fail 'fix:no space'
+          assert fail 'bogus: not a real type'
+          assert fail 'fix: ab'
+          assert fail 'feat(BadScope): uppercase scope'
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "::notice::semantic-pr-title regex behaves correctly in both directions"
+
+  # ---------------------------------------------------------------------------
+  # github-release: exercise the changelog extractor against every heading shape
+  # it claims to support. Creating a real release is not testable here.
+  # ---------------------------------------------------------------------------
+  github-release-notes:
+    name: github-release (changelog extraction)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Extractor picks the right section for each heading style
+        run: |
+          set -euo pipefail
+          extract() { # extract <version> <file>
+            awk -v want="$1" '
+              function is_heading(line) {
+                return (line ~ /^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}\]?[[:space:]]*Version[[:space:]]+[0-9]/) ||
+                       (line ~ /^#{1,3}[[:space:]]*\[?[0-9]+\.[0-9]+/)
+              }
+              function names_want(line) {
+                return is_heading(line) && line ~ ("(^|[^0-9.])" want "([^0-9.]|$)")
+              }
+              !found && names_want($0) { found = 1; next }
+              found && is_heading($0)  { exit }
+              found && $0 ~ /^[-=]+$/ && !body { next }
+              found { if ($0 != "" || body) { print; body = 1 } }
+            ' "$2"
+          }
+
+          # twilio SDK style
+          cat > sdk.md <<'MD'
+          [2026-05-07] Version 8.11.6
+          ---------------------------
+          - six only
+          [2026-05-06] Version 8.11.5
+          ---------------------------
+          - five only
+          MD
+          # keep-a-changelog style
+          cat > kac.md <<'MD'
+          ## [2.1.0] - 2026-05-07
+          - two-one only
+          ## [2.0.0] - 2026-01-01
+          - two-zero only
+          MD
+
+          fail=0
+          check() { # check <desc> <expected> <actual>
+            if [ "$2" = "$3" ]; then echo "  ok  $1"; else
+              echo "::error::$1 — expected [$2] got [$3]"; fail=1; fi
+          }
+          check "sdk 8.11.6"      "- six only"      "$(extract 8.11.6 sdk.md)"
+          check "sdk 8.11.5"      "- five only"     "$(extract 8.11.5 sdk.md)"
+          check "kac 2.1.0"       "- two-one only"  "$(extract 2.1.0 kac.md)"
+          check "kac 2.0.0"       "- two-zero only" "$(extract 2.0.0 kac.md)"
+          check "missing version" ""                "$(extract 9.9.9 sdk.md)"
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "::notice::changelog extraction correct for all supported heading shapes"
+
+  # ---------------------------------------------------------------------------
   # artifactory-oidc: only the pre-flight validation that runs BEFORE the token
   # exchange can be tested here. The exchange itself needs `trusted_builds`
   # membership this repo does not have.

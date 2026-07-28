@@ -15,6 +15,8 @@ Python (uv), and PHP (Composer); `npm-publish` is npm-specific.
 | [`uv-lockfile-hygiene`](uv-lockfile-hygiene/action.yml) | Same gate for Python (uv): scans `uv.lock` / `requirements*.txt` and clean-room installs with `uv sync --frozen` from public PyPI. Secret-less — safe on forks. |
 | [`composer-lockfile-hygiene`](composer-lockfile-hygiene/action.yml) | Same gate for PHP: scans `composer.lock` dist/source hosts, rejects a committed `repositories` block or hardcoded `version` in `composer.json`, and clean-room installs from public Packagist. Secret-less — safe on forks. |
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
+| [`github-release`](github-release/action.yml) | Creates (or updates) a GitHub Release for a tag, with notes lifted from the changelog. Pure `gh` + `awk`. |
+| [`semantic-pr-title`](semantic-pr-title/action.yml) | Checks a PR title against Conventional Commits. Pure bash. |
 
 Each is a **drop-in step** — you own the runner, matrix, lint, build, and test.
 
@@ -218,6 +220,27 @@ via the env var Lerna passes through to npm:
   `PIP_INDEX_URL` into `$GITHUB_ENV` (token as the basic-auth password, empty
   username — JFrog rejects `token` as the username). It does not touch
   `~/.npmrc`. Use `uv-lockfile-hygiene` for the gate; `npm-publish` doesn't apply.
+
+## Why `github-release` and `semantic-pr-title` exist
+
+They replace third-party actions that **cannot run in the `twilio` org**. The org's
+Actions policy allows GitHub-authored `actions/*`, first-party `twilio/*`, and an
+explicit allow-list — everything else is blocked at workflow *startup*, **even when
+correctly SHA-pinned**. A blocked reference fails the whole run in 0s with
+`startup_failure` and no annotation, which is a confusing thing to debug.
+
+Because first-party `twilio/*` actions resolve without an allow-list entry, moving
+this glue here removes the dependency entirely rather than queueing an approval:
+
+| Was | Now | Note |
+|-----|-----|------|
+| `sendgrid/dx-automator/actions/release` | `github-release` | Also drops a `node16` runtime (EOL) |
+| `amannn/action-semantic-pull-request` | `semantic-pr-title` | |
+| `docker/login-action` | *(nothing)* | `docker login --password-stdin` inline is one line |
+
+Toolchain setup actions (`shivammathur/setup-php`, `astral-sh/setup-uv`) are a
+different case — reimplementing version and extension management is not glue, so
+those belong on the allow-list.
 
 ## Versioning & pinning
 
