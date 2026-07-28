@@ -1,0 +1,9 @@
+{
+    "name": "twilio/fixture-clean",
+    "description": "Fixture: a well-formed public package. composer-lockfile-hygiene must PASS.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "psr/log": "3.0.2"
+    }
+}

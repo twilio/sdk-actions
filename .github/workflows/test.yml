@@ -1,0 +1,160 @@
+name: Test
+
+# Self-tests for the actions in this repo.
+#
+# SCOPE — read before trusting a green run:
+#   * `composer-lockfile-hygiene` is tested end-to-end (scan + clean room).
+#   * `artifactory-oidc` is NOT exercised here. It needs a live Artifactory OIDC
+#     token exchange, and this repo is not in Artifactory's `trusted_builds`
+#     (only consumer SDK repos are), so the exchange cannot succeed from here.
+#     That path is proven by the first consumer CI run — see the PHP section of
+#     the README.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Each fixture asserts an EXPECTED outcome, so a gate that stops failing is
+  # caught just as loudly as one that starts failing on good input.
+  # ---------------------------------------------------------------------------
+  composer-hygiene-scan:
+    name: composer-hygiene (${{ matrix.case }} → ${{ matrix.expect }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: clean
+            expect: success
+          - case: internal-host
+            expect: failure
+          - case: repositories-block
+            expect: failure
+          - case: pinned-version
+            expect: failure
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Stage fixture at the repo root
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          # The action scans via `git ls-files`, so the fixture has to be staged,
+          # not just present. Runner checkout is ephemeral, so mutating it is fine.
+          #
+          # Untrack the fixture tree FIRST: the action scans '**/composer.lock',
+          # which would otherwise pick up the *other* fixtures and make every
+          # case fail on the internal-host one.
+          git rm -r --cached -q test/fixtures
+          cp "test/fixtures/${CASE}/composer.json" composer.json
+          cp "test/fixtures/${CASE}/composer.lock" composer.lock
+          git add composer.json composer.lock
+          echo "Staged fixture: ${CASE}"
+          echo "Tracked composer files now visible to the scan:"
+          git ls-files 'composer.json' 'composer.lock' '**/composer.lock'
+
+      - id: hygiene
+        continue-on-error: true
+        uses: ./composer-lockfile-hygiene
+        with:
+          # Scan only. The clean-room path needs real resolvable packages and is
+          # covered by the dedicated job below.
+          clean-room: 'false'
+
+      - name: Assert outcome
+        env:
+          ACTUAL: ${{ steps.hygiene.outcome }}
+          EXPECTED: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::fixture '${{ matrix.case }}' expected the gate to $EXPECTED but it was $ACTUAL"
+            exit 1
+          fi
+          echo "OK — fixture '${{ matrix.case }}' produced the expected outcome: $ACTUAL"
+
+  # ---------------------------------------------------------------------------
+  # Clean-room path, against real packages from public Packagist. The lockfile is
+  # generated here rather than committed so the test proves a genuine public
+  # resolve instead of replaying hand-written hashes.
+  # ---------------------------------------------------------------------------
+  composer-hygiene-clean-room:
+    name: composer-hygiene (clean room, real packages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Generate a real public lockfile
+        run: |
+          set -euo pipefail
+          # Untrack the committed fixtures so the scan sees only what we generate
+          # here (the internal-host fixture would otherwise fail the gate).
+          git rm -r --cached -q test/fixtures
+          cat > composer.json <<'JSON'
+          {
+              "name": "twilio/fixture-clean-room",
+              "description": "Generated in CI to prove a real public resolve.",
+              "type": "library",
+              "license": "MIT",
+              "require": { "psr/log": "^3.0" }
+          }
+          JSON
+          composer update --no-interaction --no-progress --no-install
+          git add composer.json composer.lock
+          echo "dist hosts in the generated lockfile:"
+          python3 -c "
+          import json
+          from urllib.parse import urlparse
+          d = json.load(open('composer.lock'))
+          for p in d.get('packages') or []:
+              print(' ', p['name'], urlparse(p['dist']['url']).netloc)
+          "
+
+      - name: Hygiene gate must pass on a genuinely public lockfile
+        uses: ./composer-lockfile-hygiene
+        with:
+          clean-room: 'true'
+
+  # ---------------------------------------------------------------------------
+  # artifactory-oidc: only the pre-flight validation that runs BEFORE the token
+  # exchange can be tested here. The exchange itself needs `trusted_builds`
+  # membership this repo does not have.
+  # ---------------------------------------------------------------------------
+  artifactory-oidc-preflight:
+    name: artifactory-oidc (rejects unknown ecosystem)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # get past the OIDC-availability check to reach validation
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - id: bogus
+        continue-on-error: true
+        uses: ./artifactory-oidc
+        with:
+          ecosystem: definitely-not-a-real-ecosystem
+
+      - name: Assert it failed closed
+        env:
+          ACTUAL: ${{ steps.bogus.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTUAL" != "failure" ]; then
+            echo "::error::an unknown ecosystem must fail closed, but the action reported: $ACTUAL"
+            exit 1
+          fi
+          echo "OK — unknown ecosystem rejected."
