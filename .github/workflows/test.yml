@@ -9,6 +9,12 @@ name: Test
 #     (only consumer SDK repos are), so the exchange cannot succeed from here.
 #     That path is proven by the first consumer CI run — see the PHP section of
 #     the README.
+#
+# RUNNER LABEL: ubuntu-x64, not ubuntu-latest. The twilio org does not serve
+# ubuntu-latest for same-repo jobs — a job requesting it sits in `queued`
+# indefinitely with no error and no annotation. ubuntu-latest is only correct as
+# the FORK fallback (see the README examples), because forks can't use the
+# internal runner group.
 
 on:
   push:
@@ -26,7 +32,7 @@ jobs:
   # ---------------------------------------------------------------------------
   composer-hygiene-scan:
     name: composer-hygiene (${{ matrix.case }} → ${{ matrix.expect }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +94,7 @@ jobs:
   # ---------------------------------------------------------------------------
   composer-hygiene-clean-room:
     name: composer-hygiene (clean room, real packages)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
@@ -134,7 +140,7 @@ jobs:
   # ---------------------------------------------------------------------------
   semantic-pr-title:
     name: semantic-pr-title (table)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
@@ -182,7 +188,7 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release-notes:
     name: github-release (changelog extraction)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
@@ -243,7 +249,7 @@ jobs:
   # ---------------------------------------------------------------------------
   artifactory-oidc-preflight:
     name: artifactory-oidc (rejects unknown ecosystem)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     permissions:
       contents: read
       id-token: write # get past the OIDC-availability check to reach validation
