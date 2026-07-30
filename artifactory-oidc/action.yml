@@ -60,6 +60,15 @@ runs:
           "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ARTIFACTORY_URL}" \
           | jq -r '.value')
 
+        if [ -z "$GITHUB_JWT" ] || [ "$GITHUB_JWT" = "null" ]; then
+          echo "::error::could not obtain a GitHub OIDC token from the Actions token service"
+          exit 1
+        fi
+        # The JWT is itself a bearer credential — whoever holds it can exchange it
+        # at Artifactory, or at any other relying party that trusts this repo,
+        # until it expires. Mask it before anything downstream can echo it.
+        echo "::add-mask::$GITHUB_JWT"
+
         PAYLOAD=$(echo "$GITHUB_JWT" | cut -d. -f2 | sed 's/-/+/g; s/_/\//g' | base64 -d 2>/dev/null || true)
         echo "::debug::OIDC claims: sub=$(echo "$PAYLOAD" | jq -r '.sub'), aud=$(echo "$PAYLOAD" | jq -r '.aud')"
 
