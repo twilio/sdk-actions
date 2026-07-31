@@ -165,6 +165,7 @@ runs:
           maven)
             mkdir -p ~/.m2/
             # Pass vars explicitly into envsubst's environment so the child process can see them.
+            ART_USERNAME="$ART_USERNAME" \
             ART_TOKEN="$ART_TOKEN" \
             ARTIFACTORY_URL="$ARTIFACTORY_URL" \
             REGISTRY_PATH="$REGISTRY_PATH" \
