@@ -164,7 +164,11 @@ runs:
             ;;
           maven)
             mkdir -p ~/.m2/
-            envsubst < "$GITHUB_ACTION_PATH/maven-settings.xml.tmpl" > ~/.m2/settings.xml
+            # Pass vars explicitly into envsubst's environment so the child process can see them.
+            ART_TOKEN="$ART_TOKEN" \
+            ARTIFACTORY_URL="$ARTIFACTORY_URL" \
+            REGISTRY_PATH="$REGISTRY_PATH" \
+              envsubst < "$GITHUB_ACTION_PATH/maven-settings.xml.tmpl" > ~/.m2/settings.xml
             echo "::notice::Maven configured to use Artifactory registry (${REGISTRY_PATH})"
             ;;
         esac
