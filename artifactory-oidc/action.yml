@@ -2,13 +2,13 @@ name: 'Artifactory OIDC login'
 description: >-
   Exchange the GitHub Actions OIDC token for a short-lived Artifactory access
   token and point your package manager at the curated registry. For `npm` this
-  writes ~/.npmrc; for `python` it exports UV_INDEX_URL / PIP_INDEX_URL so uv and
-  pip resolve through Artifactory. No long-lived secrets. Requires
-  `id-token: write` on the calling job.
+  writes ~/.npmrc; for `python` it exports UV_INDEX_URL / PIP_INDEX_URL; for
+  `ruby` it configures Bundler to mirror rubygems.org through Artifactory.
+  No long-lived secrets. Requires `id-token: write` on the calling job.
 
 inputs:
   ecosystem:
-    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc) or 'python' (exports UV_INDEX_URL / PIP_INDEX_URL)."
+    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc), 'python' (exports UV_INDEX_URL / PIP_INDEX_URL), or 'ruby' (configures Bundler mirror)."
     required: false
     default: 'npm'
   artifactory-url:
@@ -16,7 +16,7 @@ inputs:
     required: false
     default: 'https://twilio.jfrog.io'
   registry-path:
-    description: 'Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty).'
+    description: 'Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty / virtual-gems-thirdparty).'
     required: false
     default: ''
   provider-name:
@@ -50,7 +50,8 @@ runs:
           case "$ECOSYSTEM" in
             npm)    REGISTRY_PATH='virtual-npm-thirdparty' ;;
             python) REGISTRY_PATH='virtual-pypi-thirdparty' ;;
-            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm' or 'python')"; exit 1 ;;
+            ruby)   REGISTRY_PATH='virtual-gems-thirdparty' ;;
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', or 'ruby')"; exit 1 ;;
           esac
         fi
 
@@ -101,5 +102,11 @@ runs:
             echo "UV_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
             echo "PIP_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
             echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
+            ;;
+          ruby)
+            MIRROR_URL="https://:${ART_TOKEN}@${HOST}/artifactory/api/gems/${REGISTRY_PATH}/"
+            echo "::add-mask::${MIRROR_URL}"
+            bundle config set --global mirror.https://rubygems.org/ "$MIRROR_URL"
+            echo "::notice::Bundler configured to mirror rubygems.org through Artifactory (${REGISTRY_PATH})"
             ;;
         esac
