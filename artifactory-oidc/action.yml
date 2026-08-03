@@ -50,7 +50,8 @@ runs:
           case "$ECOSYSTEM" in
             npm)    REGISTRY_PATH='virtual-npm-thirdparty' ;;
             python) REGISTRY_PATH='virtual-pypi-thirdparty' ;;
-            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm' or 'python')"; exit 1 ;;
+            dotnet) REGISTRY_PATH='virtual-nuget-thirdparty' ;;
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'dotnet' or 'python')"; exit 1 ;;
           esac
         fi
 
@@ -70,6 +71,7 @@ runs:
                \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\",
                \"subject_token\":\"${GITHUB_JWT}\",
                \"provider_name\":\"${PROVIDER_NAME}\"}")
+        ART_USERNAME=$(echo "$RESP" | jq -r '.username // empty')
         ART_TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
 
         if [ -z "$ART_TOKEN" ]; then
@@ -101,5 +103,8 @@ runs:
             echo "UV_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
             echo "PIP_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
             echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
+            ;;
+          dotnet)
+            nuget sources Add -Name Artifactory -Source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --username ART_USERNAME --password "${ART_TOKEN}" --StorePasswordInClearText
             ;;
         esac
