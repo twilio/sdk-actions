@@ -14,7 +14,7 @@ permissions:
 jobs:
   yaml-valid:
     name: action.yml parses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: Parse every action.yml
@@ -32,7 +32,7 @@ jobs:
   # YARN_ENABLE_SCRIPTS), so both are exercised here rather than assumed.
   scripts-canary:
     name: clean room runs no scripts (${{ matrix.label }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64
     strategy:
       fail-fast: false
       matrix:
