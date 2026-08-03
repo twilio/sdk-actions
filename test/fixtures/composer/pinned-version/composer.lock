@@ -1,0 +1,39 @@
+{
+    "_readme": [
+        "Fixture for composer-lockfile-hygiene: all dist/source hosts are PUBLIC.",
+        "Includes funding/homepage/support URLs on non-public hosts ON PURPOSE — the",
+        "scanner must ignore those and only inspect dist/source URLs."
+    ],
+    "content-hash": "0000000000000000000000000000000f",
+    "packages": [
+        {
+            "name": "psr/log",
+            "version": "3.0.2",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/php-fig/log.git",
+                "reference": "f16e1d5863e37f8d8c2a01719f5b34baa2b714d3"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/php-fig/log/zipball/f16e1d5863e37f8d8c2a01719f5b34baa2b714d3",
+                "reference": "f16e1d5863e37f8d8c2a01719f5b34baa2b714d3",
+                "shasum": ""
+            },
+            "type": "library",
+            "homepage": "https://internal.example.corp/psr-log",
+            "support": {
+                "source": "https://internal.example.corp/source"
+            },
+            "funding": [
+                {
+                    "url": "https://tidelift.com/funding/github/packagist/psr/log",
+                    "type": "tidelift"
+                }
+            ]
+        }
+    ],
+    "packages-dev": [],
+    "platform": {},
+    "platform-dev": {}
+}

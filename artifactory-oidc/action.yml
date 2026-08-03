@@ -3,12 +3,14 @@ description: >-
   Exchange the GitHub Actions OIDC token for a short-lived Artifactory access
   token and point your package manager at the curated registry. For `npm` this
   writes ~/.npmrc; for `python` it exports UV_INDEX_URL / PIP_INDEX_URL so uv and
-  pip resolve through Artifactory. No long-lived secrets. Requires
-  `id-token: write` on the calling job.
+  pip resolve through Artifactory; for `php` it writes Composer's GLOBAL config so
+  composer resolves through Artifactory; for `dotnet` it registers an Artifactory
+  NuGet source. No long-lived secrets. Requires `id-token: write` on the calling
+  job.
 
 inputs:
   ecosystem:
-    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc) or 'python' (exports UV_INDEX_URL / PIP_INDEX_URL)."
+    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc), 'python' (exports UV_INDEX_URL / PIP_INDEX_URL), 'php' (writes Composer global config), or 'dotnet' (adds a NuGet source)."
     required: false
     default: 'npm'
   artifactory-url:
@@ -16,7 +18,7 @@ inputs:
     required: false
     default: 'https://twilio.jfrog.io'
   registry-path:
-    description: 'Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty).'
+    description: 'Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty / virtual-php-thirdparty / virtual-nuget-thirdparty).'
     required: false
     default: ''
   provider-name:
@@ -50,8 +52,9 @@ runs:
           case "$ECOSYSTEM" in
             npm)    REGISTRY_PATH='virtual-npm-thirdparty' ;;
             python) REGISTRY_PATH='virtual-pypi-thirdparty' ;;
+            php)    REGISTRY_PATH='virtual-php-thirdparty' ;;
             dotnet) REGISTRY_PATH='virtual-nuget-thirdparty' ;;
-            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'dotnet' or 'python')"; exit 1 ;;
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'php', or 'dotnet')"; exit 1 ;;
           esac
         fi
 
@@ -112,6 +115,38 @@ runs:
             echo "UV_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
             echo "PIP_INDEX_URL=${INDEX_URL}" >> "$GITHUB_ENV"
             echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
+            ;;
+          php)
+            if ! command -v composer >/dev/null 2>&1; then
+              echo "::error::composer not found on PATH — run shivammathur/setup-php (or otherwise install Composer) BEFORE this action"
+              exit 1
+            fi
+
+            # Write to Composer's GLOBAL config, never the repo's composer.json.
+            # A committed `repositories` block would ship an internal Twilio
+            # hostname to every consumer of a public package, and `composer-
+            # lockfile-hygiene` fails the build if one is present.
+            composer config --global \
+              repositories.twilio-curated composer \
+              "${ARTIFACTORY_URL}/artifactory/api/composer/${REGISTRY_PATH}"
+
+            # Disable public Packagist so curation is FAIL-CLOSED. Composer
+            # consults repositories in order and falls through on a miss, so
+            # leaving packagist.org enabled means any package Artifactory REFUSES
+            # (curation block, CVE, version-age cooldown) is silently fetched
+            # from upstream instead — the control would fail open with no error.
+            #
+            # The key MUST be `packagist.org`. The legacy `repo.packagist` alias
+            # creates a separate entry named "packagist" and leaves the real
+            # default enabled.
+            composer config --global repo.packagist.org false
+
+            # JFrog access tokens authenticate as a BEARER token. Composer's
+            # http-basic requires a username, and JFrog rejects the literal
+            # "token" as one (401) — so use Composer's bearer auth instead.
+            composer config --global --auth "bearer.${HOST}" "${ART_TOKEN}"
+
+            echo "::notice::composer configured to resolve through Artifactory (${REGISTRY_PATH})"
             ;;
           dotnet)
             nuget sources Add -Name Artifactory -Source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --username ART_USERNAME --password "${ART_TOKEN}" --StorePasswordInClearText

@@ -1,0 +1,146 @@
+name: 'Semantic PR title'
+description: >-
+  Check that a pull request title follows Conventional Commits
+  (`type(scope)!: subject`). Pure bash — no third-party action, so no org
+  allow-list entry is needed. Run on `pull_request` or `pull_request_target`.
+
+inputs:
+  types:
+    description: 'Allowed types, one per line or comma-separated.'
+    required: false
+    default: |
+      chore
+      docs
+      fix
+      feat
+      misc
+      test
+  require-scope:
+    description: 'Require a (scope) after the type.'
+    required: false
+    default: 'false'
+  subject-min-length:
+    description: 'Minimum subject length after the colon.'
+    required: false
+    default: '3'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        # Via env, never interpolated into the script — a PR title is
+        # attacker-controlled text and must not reach the shell as code.
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        TYPES: ${{ inputs.types }}
+        REQUIRE_SCOPE: ${{ inputs.require-scope }}
+        MIN_LEN: ${{ inputs.subject-min-length }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${PR_TITLE:-}" ]; then
+          echo "::error::no pull request title found — this action needs a 'pull_request' or 'pull_request_target' event"
+          exit 1
+        fi
+
+        # Normalise the type list: commas or newlines -> a | alternation.
+        TYPE_ALT="$(printf '%s' "$TYPES" \
+          | tr ',' '\n' \
+          | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+          | grep -v '^$' \
+          | paste -sd '|' -)"
+        if [ -z "$TYPE_ALT" ]; then
+          echo "::error::the 'types' input is empty"
+          exit 1
+        fi
+
+        if [ "$REQUIRE_SCOPE" = "true" ]; then
+          SCOPE_RE='\([a-z0-9][a-z0-9._/-]*\)'
+        else
+          SCOPE_RE='(\([a-z0-9][a-z0-9._/-]*\))?'
+        fi
+
+        RE="^(${TYPE_ALT})${SCOPE_RE}!?: .{${MIN_LEN},}$"
+
+        if [[ "$PR_TITLE" =~ $RE ]]; then
+          echo "::notice::PR title OK — \"${PR_TITLE}\""
+          exit 0
+        fi
+
+        # Build a diagnosis that says what to fix, not just "invalid". Every
+        # check below is independent and appends to PROBLEMS, so a title with
+        # several faults reports all of them at once — one CI round-trip per
+        # title, not one per fault.
+        PROBLEMS=()
+
+        if [[ ! "$PR_TITLE" =~ : ]]; then
+          PROBLEMS+=("no colon. A type and a colon are required, e.g. 'fix: correct retry backoff'.")
+        fi
+
+        # The leading word, whether or not a colon follows it. Copy the capture
+        # out FIRST: a failed [[ =~ ]] clears BASH_REMATCH entirely, so reading
+        # it after the type test would trip `set -u` on exactly the titles this
+        # branch exists to describe.
+        if [[ "$PR_TITLE" =~ ^([a-zA-Z]+) ]]; then
+          LEADING="${BASH_REMATCH[1]}"
+          if ! [[ "$LEADING" =~ ^(${TYPE_ALT})$ ]]; then
+            PROBLEMS+=("'${LEADING}' is not an allowed type.")
+          fi
+        else
+          PROBLEMS+=("the title must begin with a type, e.g. 'feat'.")
+        fi
+
+        if [[ "$PR_TITLE" =~ :[^[:space:]] ]]; then
+          PROBLEMS+=("missing the space after the colon ('fix:thing' should be 'fix: thing').")
+        fi
+
+        # Only measure the subject when a colon+space actually delimits one;
+        # otherwise the no-colon problem above already explains the failure.
+        if [[ "$PR_TITLE" =~ :[[:space:]](.*)$ ]]; then
+          SUBJECT="${BASH_REMATCH[1]}"
+          if [ "${#SUBJECT}" -lt "$MIN_LEN" ]; then
+            PROBLEMS+=("the subject is ${#SUBJECT} characters; at least ${MIN_LEN} are required.")
+          fi
+        fi
+
+        # Everything before the first colon, minus a breaking-change marker.
+        PREFIX="${PR_TITLE%%:*}"
+        PREFIX="${PREFIX%!}"
+        if [[ "$PREFIX" =~ \( ]]; then
+          if ! [[ "$PREFIX" =~ ^[a-zA-Z]+\([a-z0-9][a-z0-9._/-]*\)$ ]]; then
+            PROBLEMS+=("the scope is malformed — use a lowercase '(scope)', e.g. 'fix(http): ...'.")
+          fi
+        elif [ "$REQUIRE_SCOPE" = "true" ]; then
+          PROBLEMS+=("a scope is required here — use 'type(scope): subject'.")
+        fi
+
+        # Belt and braces: the regex rejected the title but no specific check
+        # fired, so say what it had to match rather than printing nothing.
+        if [ "${#PROBLEMS[@]}" -eq 0 ]; then
+          PROBLEMS+=("the title does not match ${RE}")
+        fi
+
+        echo "::error::PR title does not follow Conventional Commits: \"${PR_TITLE}\""
+        {
+          if [ "$REQUIRE_SCOPE" = "true" ]; then
+            echo "Expected:  type(scope): subject        <- scope is REQUIRED in this repo"
+          else
+            echo "Expected:  type(optional-scope): subject"
+          fi
+          echo "Allowed types: ${TYPE_ALT//|/, }"
+          echo
+          for p in "${PROBLEMS[@]}"; do
+            echo "Problem: ${p}"
+          done
+          echo
+          if [ "$REQUIRE_SCOPE" = "true" ]; then
+            echo "Examples:  feat(messaging): add v2 client"
+            echo "           fix(http): retry on 429"
+            echo "           chore(php)!: drop PHP 7.2 support"
+          else
+            echo "Examples:  feat: add messaging v2 client"
+            echo "           fix(http): retry on 429"
+            echo "           chore!: drop PHP 7.2 support"
+          fi
+        } >&2
+        exit 1

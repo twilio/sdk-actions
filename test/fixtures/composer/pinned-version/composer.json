@@ -1,0 +1,10 @@
+{
+    "name": "twilio/fixture-pinned-version",
+    "description": "Fixture: hardcoded version field. Scanner must FAIL.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "psr/log": "3.0.2"
+    },
+    "version": "2.0.0"
+}
