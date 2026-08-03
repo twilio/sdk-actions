@@ -7,9 +7,22 @@ description: >-
 
 inputs:
   install-command:
-    description: 'Clean-room install command; empty = `uv sync --frozen`.'
+    description: >-
+      Clean-room install command; empty = `uv sync --frozen` (plus `--no-build`
+      when no-build is true). An override owns its own build-execution safety —
+      see the no-build input.
     required: false
     default: ''
+  no-build:
+    description: >-
+      Pass `--no-build` to the clean-room install, refusing source distributions
+      so no package build backend executes. Python has no `--ignore-scripts`
+      equivalent — installing an sdist runs its build backend by design — so this
+      is the only way to keep dependency code from executing here, which matters
+      because this job runs on fork PRs. Defaults to false because it fails on
+      any dependency that ships no wheel; turn it on if your tree is wheels-only.
+    required: false
+    default: 'false'
   scan:
     description: 'Run the non-public-host scan.'
     required: false
@@ -82,13 +95,20 @@ runs:
       shell: bash
       env:
         INSTALL_OVERRIDE: ${{ inputs.install-command }}
+        NO_BUILD: ${{ inputs.no-build }}
         # Force public PyPI and fail fast rather than hang on an unreachable host.
         UV_INDEX_URL: https://pypi.org/simple
         PIP_INDEX_URL: https://pypi.org/simple
       run: |
+        NO_BUILD_FLAG=""
+        if [ "$NO_BUILD" = "true" ]; then
+          NO_BUILD_FLAG="--no-build"
+          echo "::notice::wheels only — sdists refused, so no build backend executes"
+        fi
         if [ -n "$INSTALL_OVERRIDE" ]; then
           eval "$INSTALL_OVERRIDE"
         else
-          uv sync --frozen
+          # Unquoted on purpose: a single known flag or empty, never a path.
+          uv sync --frozen $NO_BUILD_FLAG
         fi
         echo "::notice::clean-room public install succeeded"

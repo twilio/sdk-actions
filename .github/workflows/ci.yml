@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here needs a credential. Declared at workflow level because every job
+# below wants exactly this — see the OIDC note in the README before adding
+# id-token: write to anything in this repo.
+permissions:
+  contents: read
+
+jobs:
+  yaml-valid:
+    name: action.yml parses
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Parse every action.yml
+        run: |
+          for f in */action.yml; do
+            python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "$f"
+            echo "ok: $f"
+          done
+
+  # Regression test for the clean-room install in npm-lockfile-hygiene: it must
+  # NOT execute dependency lifecycle scripts. That job is advertised as safe on
+  # forks, which means it runs dependency code authored by whoever opened the PR.
+  #
+  # yarn v1 and Berry spell the setting differently (YARN_IGNORE_SCRIPTS vs
+  # YARN_ENABLE_SCRIPTS), so both are exercised here rather than assumed.
+  scripts-canary:
+    name: clean room runs no scripts (${{ matrix.label }})
+    runs-on: ubuntu-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: npm, pm: npm, package-manager: '' }
+          - { label: yarn-v1, pm: yarn, package-manager: 'yarn@1.22.22' }
+          - { label: yarn-berry, pm: yarn, package-manager: 'yarn@4.5.0' }
+          - { label: pnpm, pm: pnpm, package-manager: 'pnpm@9.12.0' }
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # Recent corepack (0.34.x) cannot verify the registry signatures published
+      # for legacy yarn 1.x and dies with "No compatible signature found in
+      # package metadata". This only affects how the test fixture FETCHES yarn
+      # itself — not the behaviour under test. See the note in the PR about
+      # consumers who pin yarn@1.x via `packageManager`.
+      COREPACK_INTEGRITY_KEYS: '0'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      # A local file: dependency whose postinstall drops a marker at an absolute
+      # path, so it lands in the same place regardless of how each package
+      # manager lays out node_modules (pnpm's virtual store included).
+      - name: Build canary fixture
+        env:
+          PM: ${{ matrix.pm }}
+          PKG_MGR: ${{ matrix.package-manager }}
+        run: |
+          MARKER="$GITHUB_WORKSPACE/RAN_SCRIPT"
+          mkdir -p canary-dep
+
+          # Unquoted heredoc so $MARKER is baked in as an absolute path. No
+          # backslash escaping needed, and no sed (BSD/GNU -i differ).
+          cat > canary-dep/postinstall.js <<JS
+          require('fs').writeFileSync('$MARKER', 'x');
+          JS
+
+          cat > canary-dep/package.json <<'JSON'
+          { "name": "canary-dep", "version": "1.0.0",
+            "scripts": { "postinstall": "node postinstall.js" } }
+          JSON
+
+          cat > package.json <<'JSON'
+          { "name": "canary-root", "version": "1.0.0", "private": true,
+            "dependencies": { "canary-dep": "file:./canary-dep" } }
+          JSON
+
+          if [ -n "$PKG_MGR" ]; then
+            node -e 'const fs=require("fs"),j=JSON.parse(fs.readFileSync("package.json","utf8"));j.packageManager=process.env.PKG_MGR;fs.writeFileSync("package.json",JSON.stringify(j,null,2))'
+          fi
+
+          # Berry defaults to PnP; node-modules keeps the fixture close to what
+          # real consumers run. yarn v1 reads .yarnrc, not .yarnrc.yml, so this
+          # file is simply ignored there.
+          if [ "$PM" = "yarn" ]; then
+            printf 'nodeLinker: node-modules\nenableTelemetry: false\n' > .yarnrc.yml
+          fi
+
+          # Seed a lockfile so the action's --frozen-lockfile / ci install has one
+          # to work from. Scripts stay off here too, so a marker after this step
+          # would mean the SEEDING leaked, not the action.
+          case "$PM" in
+            npm)  npm install --package-lock-only --ignore-scripts ;;
+            yarn)
+              if [ "$(corepack yarn --version | cut -d. -f1)" = "1" ]; then
+                corepack yarn install --ignore-scripts
+              else
+                # Berry turns on immutable installs whenever CI is set, so a
+                # lockfile-creating install is refused (YN0028). This step's whole
+                # job is to create one, so opt out — for the SEEDING only. The
+                # action's own install below stays immutable, which is the point.
+                YARN_ENABLE_SCRIPTS=false YARN_ENABLE_IMMUTABLE_INSTALLS=false \
+                  corepack yarn install
+              fi
+              ;;
+            pnpm) corepack pnpm install --ignore-scripts ;;
+          esac
+
+          if [ -f "$MARKER" ]; then
+            echo "::error::fixture seeding ran the postinstall — the canary itself is broken"
+            exit 1
+          fi
+
+          # Clear the tree so the action performs a real cold install.
+          rm -rf node_modules .yarn .pnp.cjs .pnp.loader.mjs
+          echo "fixture ready for $PM ${PKG_MGR:-(default)}"
+
+      - name: Clean-room install via npm-lockfile-hygiene
+        uses: ./npm-lockfile-hygiene
+        with:
+          package-manager: ${{ matrix.pm }}
+          # The fixture is untracked, so there is nothing for the host scan to
+          # read; this test is only about the install half.
+          scan: false
+
+      - name: Assert no lifecycle script executed
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/RAN_SCRIPT" ]; then
+            echo "::error::dependency postinstall executed during the clean-room install"
+            exit 1
+          fi
+          # Prove the install actually happened, so a silent no-op can't pass.
+          if [ ! -d node_modules ]; then
+            echo "::error::no node_modules — the install did not run, so this proves nothing"
+            exit 1
+          fi
+          echo "ok: dependencies installed and no lifecycle scripts ran"
