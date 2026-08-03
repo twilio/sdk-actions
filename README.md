@@ -12,7 +12,7 @@ Python (uv), and PHP (Composer); `npm-publish` is npm-specific.
 |--------|--------------|
 | [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points your package manager at the curated registry — npm via `~/.npmrc`, Python (`ecosystem: python`) via `UV_INDEX_URL` / `PIP_INDEX_URL`, or PHP (`ecosystem: php`) via Composer global config. No stored secret. |
 | [`npm-lockfile-hygiene`](npm-lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
-| [`uv-lockfile-hygiene`](uv-lockfile-hygiene/action.yml) | Same gate for Python (uv): scans `uv.lock` / `requirements*.txt` and clean-room installs with `uv sync --frozen` from public PyPI. Secret-less — safe on forks. |
+| [`uv-lockfile-hygiene`](uv-lockfile-hygiene/action.yml) | Same gate for Python (uv): scans `uv.lock` / `requirements*.txt` and clean-room installs with `uv sync --frozen` from public PyPI. Secret-less — safe on forks. Pass `no-build: true` for a wheels-only install so no dependency build backend executes. |
 | [`composer-lockfile-hygiene`](composer-lockfile-hygiene/action.yml) | Same gate for PHP: scans `composer.lock` dist/source hosts, rejects a committed `repositories` block or hardcoded `version` in `composer.json`, and clean-room installs from public Packagist. Secret-less — safe on forks. |
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 | [`github-release`](github-release/action.yml) | Creates (or updates) a GitHub Release for a tag, with notes lifted from the changelog. Pure `gh` + `awk`. |
@@ -52,6 +52,9 @@ jobs:
         uses: twilio/sdk-actions/artifactory-oidc@<sha>  # v1.2.3
       - uses: actions/setup-node@<sha>        # v6
         with: { node-version: '${{ matrix.node }}', cache: yarn }
+      # This job holds id-token: write, so dependency scripts run alongside the
+      # ability to mint OIDC tokens. Add --ignore-scripts if your package doesn't
+      # need them; if it does, split the job (see "Notes that bite").
       - run: yarn install --frozen-lockfile
       - run: yarn lint
       - run: yarn build
@@ -90,6 +93,9 @@ jobs:
       - uses: astral-sh/setup-uv@<sha>        # v5
       - uses: actions/setup-python@<sha>      # v5
         with: { python-version: '3.12' }
+      # This job holds id-token: write. `uv sync` executes the build backend of
+      # any sdist in the tree and Python has no --ignore-scripts, so a wheels-only
+      # tree (add --no-build) or a job split is the only real guard here.
       - run: uv sync --frozen --all-extras --all-groups
       - run: uv run pytest
 ```
@@ -199,11 +205,28 @@ via the env var Lerna passes through to npm:
 ## Notes that bite
 
 - **`id-token: write`** must be on any job using `artifactory-oidc` or `npm-publish`.
+  Put it on **that job only**, never at workflow level — see below.
+- **`id-token: write` is a job-wide grant.** GitHub injects the token-request
+  credentials into the whole job environment, where any process can read them,
+  including a dependency's `postinstall`. You cannot restrict the audience or drop
+  the permission part-way through a job, so **anything that installs dependencies
+  in such a job should pass `--ignore-scripts`.** A stolen token is only useful
+  against a relying party that already trusts this repo — curated Artifactory
+  (read) and npm publish for your package — which is exactly why the environment
+  binding below matters. If your package genuinely needs lifecycle scripts, split
+  the work: do the OIDC login and an `--ignore-scripts` install in one job, upload
+  the result, and run scripts in a second job with no `id-token`. Python has no
+  `--ignore-scripts` equivalent (installing an sdist runs its build backend by
+  design) — there, the job split or `uv --no-build` is the only real control.
 - **`artifactory-url`** defaults to `https://twilio.jfrog.io` — no need to set it;
   pass the input only to override the host.
 - **Publish env is `production`** — the GitHub Environment, the `environment:` in
   your workflow, and the npm trusted-publisher registration must all say
-  `production`, or OIDC publish fails.
+  `production`, or OIDC publish fails. **Do not leave the environment blank on the
+  trusted publisher:** npm matches on repo + workflow filename + environment, so
+  if your test and publish jobs live in the same workflow file they present the
+  same `workflow_ref`, and the environment claim is the only thing distinguishing
+  them. Blank means any job in that file can publish, approval gate included.
 - **Node ≥ 24** for the publish job (npm ≥ 11.5.1 for OIDC trusted publishing).
 - **Private repos**: `provenance: false` — npm rejects provenance from private
   sources even for public packages.

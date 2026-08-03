@@ -11,7 +11,11 @@ inputs:
     required: false
     default: 'npm'
   install-command:
-    description: 'Clean-room install command; empty = derive from package-manager.'
+    description: >-
+      Clean-room install command; empty = derive from package-manager. The
+      derived commands disable dependency lifecycle scripts — if you override
+      this, pass your package manager's own ignore-scripts option, or the clean
+      room will execute dependency code (including on fork PRs).
     required: false
     default: ''
   scan:
@@ -101,8 +105,26 @@ runs:
         else
           case "$PM" in
             npm)  npm ci --ignore-scripts ;;
-            yarn) yarn install --frozen-lockfile ;;
-            pnpm) pnpm install --frozen-lockfile ;;
+            # Proving the lockfile resolves from public registries never needs
+            # lifecycle scripts, and this job runs attacker-authored dependency
+            # code on fork PRs — so disable them.
+            #
+            # yarn v1 and Berry spell this differently and neither tolerates the
+            # other's spelling: v1 takes --ignore-scripts, while Berry rejects
+            # that flag AND hard-errors on YARN_IGNORE_SCRIPTS ("Unrecognized or
+            # legacy configuration settings"). So branch on the major version
+            # corepack resolved from the repo's `packageManager` field.
+            yarn)
+              # `|| true` so pipefail doesn't abort here when yarn is missing —
+              # let the install below report that with a useful message.
+              YARN_MAJOR="$(yarn --version 2>/dev/null | cut -d. -f1 || true)"
+              if [ "$YARN_MAJOR" = "1" ]; then
+                yarn install --frozen-lockfile --ignore-scripts
+              else
+                YARN_ENABLE_SCRIPTS=false yarn install --frozen-lockfile
+              fi
+              ;;
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts ;;
             *) echo "::error::unknown package-manager '$PM'"; exit 1 ;;
           esac
         fi
