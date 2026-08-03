@@ -67,25 +67,80 @@ runs:
           exit 0
         fi
 
-        # Build a diagnosis that says what to fix, not just "invalid".
+        # Build a diagnosis that says what to fix, not just "invalid". Every
+        # check below is independent and appends to PROBLEMS, so a title with
+        # several faults reports all of them at once — one CI round-trip per
+        # title, not one per fault.
+        PROBLEMS=()
+
+        if [[ ! "$PR_TITLE" =~ : ]]; then
+          PROBLEMS+=("no colon. A type and a colon are required, e.g. 'fix: correct retry backoff'.")
+        fi
+
+        # The leading word, whether or not a colon follows it. Copy the capture
+        # out FIRST: a failed [[ =~ ]] clears BASH_REMATCH entirely, so reading
+        # it after the type test would trip `set -u` on exactly the titles this
+        # branch exists to describe.
+        if [[ "$PR_TITLE" =~ ^([a-zA-Z]+) ]]; then
+          LEADING="${BASH_REMATCH[1]}"
+          if ! [[ "$LEADING" =~ ^(${TYPE_ALT})$ ]]; then
+            PROBLEMS+=("'${LEADING}' is not an allowed type.")
+          fi
+        else
+          PROBLEMS+=("the title must begin with a type, e.g. 'feat'.")
+        fi
+
+        if [[ "$PR_TITLE" =~ :[^[:space:]] ]]; then
+          PROBLEMS+=("missing the space after the colon ('fix:thing' should be 'fix: thing').")
+        fi
+
+        # Only measure the subject when a colon+space actually delimits one;
+        # otherwise the no-colon problem above already explains the failure.
+        if [[ "$PR_TITLE" =~ :[[:space:]](.*)$ ]]; then
+          SUBJECT="${BASH_REMATCH[1]}"
+          if [ "${#SUBJECT}" -lt "$MIN_LEN" ]; then
+            PROBLEMS+=("the subject is ${#SUBJECT} characters; at least ${MIN_LEN} are required.")
+          fi
+        fi
+
+        # Everything before the first colon, minus a breaking-change marker.
+        PREFIX="${PR_TITLE%%:*}"
+        PREFIX="${PREFIX%!}"
+        if [[ "$PREFIX" =~ \( ]]; then
+          if ! [[ "$PREFIX" =~ ^[a-zA-Z]+\([a-z0-9][a-z0-9._/-]*\)$ ]]; then
+            PROBLEMS+=("the scope is malformed — use a lowercase '(scope)', e.g. 'fix(http): ...'.")
+          fi
+        elif [ "$REQUIRE_SCOPE" = "true" ]; then
+          PROBLEMS+=("a scope is required here — use 'type(scope): subject'.")
+        fi
+
+        # Belt and braces: the regex rejected the title but no specific check
+        # fired, so say what it had to match rather than printing nothing.
+        if [ "${#PROBLEMS[@]}" -eq 0 ]; then
+          PROBLEMS+=("the title does not match ${RE}")
+        fi
+
         echo "::error::PR title does not follow Conventional Commits: \"${PR_TITLE}\""
         {
-          echo "Expected:  type(optional-scope): subject"
+          if [ "$REQUIRE_SCOPE" = "true" ]; then
+            echo "Expected:  type(scope): subject        <- scope is REQUIRED in this repo"
+          else
+            echo "Expected:  type(optional-scope): subject"
+          fi
           echo "Allowed types: ${TYPE_ALT//|/, }"
           echo
-          if [[ ! "$PR_TITLE" =~ : ]]; then
-            echo "Problem: no colon. A type and a colon are required, e.g. 'fix: correct retry backoff'."
-          elif [[ "$PR_TITLE" =~ ^([a-zA-Z]+) ]] && \
-               ! [[ "${BASH_REMATCH[1]}" =~ ^(${TYPE_ALT})$ ]]; then
-            echo "Problem: '${BASH_REMATCH[1]}' is not an allowed type."
-          elif [[ "$PR_TITLE" =~ :[^[:space:]] ]]; then
-            echo "Problem: missing the space after the colon ('fix:thing' should be 'fix: thing')."
-          else
-            echo "Problem: the subject is shorter than ${MIN_LEN} characters, or the scope is malformed."
-          fi
+          for p in "${PROBLEMS[@]}"; do
+            echo "Problem: ${p}"
+          done
           echo
-          echo "Examples:  feat: add messaging v2 client"
-          echo "           fix(http): retry on 429"
-          echo "           chore!: drop PHP 7.2 support"
+          if [ "$REQUIRE_SCOPE" = "true" ]; then
+            echo "Examples:  feat(messaging): add v2 client"
+            echo "           fix(http): retry on 429"
+            echo "           chore(php)!: drop PHP 7.2 support"
+          else
+            echo "Examples:  feat: add messaging v2 client"
+            echo "           fix(http): retry on 429"
+            echo "           chore!: drop PHP 7.2 support"
+          fi
         } >&2
         exit 1

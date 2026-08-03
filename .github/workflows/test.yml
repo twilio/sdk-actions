@@ -60,8 +60,8 @@ jobs:
           # which would otherwise pick up the *other* fixtures and make every
           # case fail on the internal-host one.
           git rm -r --cached -q test/fixtures
-          cp "test/fixtures/${CASE}/composer.json" composer.json
-          cp "test/fixtures/${CASE}/composer.lock" composer.lock
+          cp "test/fixtures/composer/${CASE}/composer.json" composer.json
+          cp "test/fixtures/composer/${CASE}/composer.lock" composer.lock
           git add composer.json composer.lock
           echo "Staged fixture: ${CASE}"
           echo "Tracked composer files now visible to the scan:"

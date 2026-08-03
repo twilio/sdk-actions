@@ -41,31 +41,30 @@ runs:
         # internal GHE, other private registries) fails the gate.
         ALLOW='repo\.packagist\.org|packagist\.org|github\.com|api\.github\.com|codeload\.github\.com|gitlab\.com|bitbucket\.org'
         [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+
+        # dist_hosts.py returns only the dist/source URLs that decide where a dep
+        # is fetched from — see its docstring for what it deliberately ignores.
+        # It lives beside this action.yml so it can be read and tested on its
+        # own; $GITHUB_ACTION_PATH resolves it wherever the action is checked out.
+        #
+        # Checked up front, and every invocation is checked below, because a
+        # scanner that silently produces no hosts would report "all hosts are
+        # public" — this gate must fail CLOSED, never quietly pass.
+        SCAN="${GITHUB_ACTION_PATH:-}/dist_hosts.py"
+        if [ ! -f "$SCAN" ]; then
+          echo "::error::cannot find dist_hosts.py at '${SCAN}' — refusing to report a pass without scanning"
+          exit 1
+        fi
+
         BAD=""
         FOUND=0
         while IFS= read -r f; do
           [ -f "$f" ] || continue
           FOUND=1
-          # Only inspect the dist/source URLs that decide where a dep is fetched
-          # from. NOT `funding`, `homepage`, or `support` — those legitimately
-          # point anywhere and are all over a real composer.lock.
-          HOSTS=$(python3 - "$f" <<'PY'
-        import json, sys
-        from urllib.parse import urlparse
-        hosts = set()
-        try:
-            data = json.load(open(sys.argv[1]))
-        except Exception:
-            sys.exit(0)
-        for key in ('packages', 'packages-dev'):
-            for pkg in data.get(key) or []:
-                for section in ('dist', 'source'):
-                    url = (pkg.get(section) or {}).get('url')
-                    if url and url.startswith(('http://', 'https://')):
-                        hosts.add(urlparse(url).netloc)
-        print('\n'.join(sorted(hosts)))
-        PY
-        )
+          if ! HOSTS=$(python3 "$SCAN" "$f"); then
+            echo "::error file=${f}::could not read dist hosts from ${f}"
+            exit 1
+          fi
           for h in $HOSTS; do
             echo "$h" | grep -qE "^($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
           done
