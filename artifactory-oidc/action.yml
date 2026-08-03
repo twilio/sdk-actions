@@ -106,7 +106,7 @@ runs:
           ruby)
             MIRROR_URL="https://:${ART_TOKEN}@${HOST}/artifactory/api/gems/${REGISTRY_PATH}/"
             echo "::add-mask::${MIRROR_URL}"
-            echo "BUNDLE_MIRROR__HTTPS___RUBYGEMS_ORG_=${MIRROR_URL}" >> "$GITHUB_ENV"
+            echo "BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=${MIRROR_URL}" >> "$GITHUB_ENV"
             echo "::notice::Bundler configured to mirror rubygems.org through Artifactory (${REGISTRY_PATH})"
             ;;
         esac
