@@ -104,10 +104,12 @@ runs:
             echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
             ;;
           ruby)
-            MIRROR_URL="https://:${ART_TOKEN}@${HOST}/artifactory/${REGISTRY_PATH}/"
-            echo "::add-mask::${MIRROR_URL}"
-            mkdir -p ~/.bundle
-            printf -- '---\nBUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/: "%s"\n' "$MIRROR_URL" > ~/.bundle/config
+            MIRROR_URL="https://${HOST}/artifactory/${REGISTRY_PATH}/"
+            echo "::add-mask::${ART_TOKEN}"
+            # Env var key: dots→__ , dashes→___ , then uppercase
+            CRED_KEY=$(echo "$HOST" | sed 's/\./__/g; s/-/___/g' | tr '[:lower:]' '[:upper:]')
+            echo "BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=${MIRROR_URL}" >> "$GITHUB_ENV"
+            echo "BUNDLE_${CRED_KEY}=token:${ART_TOKEN}" >> "$GITHUB_ENV"
             echo "::notice::Bundler configured to mirror rubygems.org through Artifactory (${REGISTRY_PATH})"
             ;;
         esac
