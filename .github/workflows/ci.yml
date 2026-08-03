@@ -103,7 +103,12 @@ jobs:
               if [ "$(corepack yarn --version | cut -d. -f1)" = "1" ]; then
                 corepack yarn install --ignore-scripts
               else
-                YARN_ENABLE_SCRIPTS=false corepack yarn install
+                # Berry turns on immutable installs whenever CI is set, so a
+                # lockfile-creating install is refused (YN0028). This step's whole
+                # job is to create one, so opt out — for the SEEDING only. The
+                # action's own install below stays immutable, which is the point.
+                YARN_ENABLE_SCRIPTS=false YARN_ENABLE_IMMUTABLE_INSTALLS=false \
+                  corepack yarn install
               fi
               ;;
             pnpm) corepack pnpm install --ignore-scripts ;;
