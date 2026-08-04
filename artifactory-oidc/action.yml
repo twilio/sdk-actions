@@ -79,6 +79,8 @@ runs:
           exit 1
         fi
         echo "::add-mask::$ART_TOKEN"
+
+        # CGI escape the username for the Bundler mirror URL
         ART_USER=$(echo "$RESP" | jq -r '.username // empty' | sed 's/\//%2F/g')
 
         # 3. Point the package manager at the curated Artifactory registry.
