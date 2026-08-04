@@ -79,8 +79,7 @@ runs:
           exit 1
         fi
         echo "::add-mask::$ART_TOKEN"
-        ART_USER=$(echo "$RESP" | jq -r '.username // empty')
-        echo "::notice::OIDC token issued for user: ${ART_USER:-<none>}"
+        ART_USER=$(echo "$RESP" | jq -r '.username // empty' | sed 's/\//%2F/g')
 
         # 3. Point the package manager at the curated Artifactory registry.
         HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
@@ -110,7 +109,7 @@ runs:
             echo "::add-mask::${ART_TOKEN}"
             echo "BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=${MIRROR_URL}" >> "$GITHUB_ENV"
             CRED_KEY=$(echo "$HOST" | sed 's/\./__/g; s/-/___/g' | tr '[:lower:]' '[:upper:]')
-            echo "BUNDLE_${CRED_KEY}=${ART_USER:-token}:${ART_TOKEN}" >> "$GITHUB_ENV"
+            echo "BUNDLE_${CRED_KEY}=${ART_USER}:${ART_TOKEN}" >> "$GITHUB_ENV"
             echo "::notice::Bundler configured to mirror rubygems.org through Artifactory (${REGISTRY_PATH})"
             ;;
         esac
