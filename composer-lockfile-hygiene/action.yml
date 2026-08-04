@@ -1,0 +1,132 @@
+name: 'Composer lockfile hygiene'
+description: >-
+  Supply-chain gate for public PHP/Composer packages. (1) Scan tracked
+  composer.json / composer.lock and fail closed on any non-public dist host, a
+  committed `repositories` override, or a hardcoded `version`; (2) optionally
+  prove the committed lockfile installs from PUBLIC Packagist only. Secret-less —
+  safe on forks. Drop into its OWN job for a true clean room.
+
+inputs:
+  scan:
+    description: 'Run the non-public-host / composer.json sanity scan.'
+    required: false
+    default: 'true'
+  clean-room:
+    description: 'Run the public-only install to prove external installability.'
+    required: false
+    default: 'true'
+  allow-hosts:
+    description: 'Extra dist hosts to allow, pipe-separated regex (e.g. repo\.example\.com).'
+    required: false
+    default: ''
+  php-version:
+    description: 'PHP version for the clean-room install.'
+    required: false
+    default: '8.3'
+  install-command:
+    description: 'Clean-room install command; empty = composer install --no-scripts.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Scan composer.lock for non-public dist hosts
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      env:
+        EXTRA_ALLOW: ${{ inputs.allow-hosts }}
+      run: |
+        # Hosts an external consumer can reach. Anything else (Twilio Artifactory,
+        # internal GHE, other private registries) fails the gate.
+        ALLOW='repo\.packagist\.org|packagist\.org|github\.com|api\.github\.com|codeload\.github\.com|gitlab\.com|bitbucket\.org'
+        [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+
+        # dist_hosts.py returns only the dist/source URLs that decide where a dep
+        # is fetched from — see its docstring for what it deliberately ignores.
+        # It lives beside this action.yml so it can be read and tested on its
+        # own; $GITHUB_ACTION_PATH resolves it wherever the action is checked out.
+        #
+        # Checked up front, and every invocation is checked below, because a
+        # scanner that silently produces no hosts would report "all hosts are
+        # public" — this gate must fail CLOSED, never quietly pass.
+        SCAN="${GITHUB_ACTION_PATH:-}/dist_hosts.py"
+        if [ ! -f "$SCAN" ]; then
+          echo "::error::cannot find dist_hosts.py at '${SCAN}' — refusing to report a pass without scanning"
+          exit 1
+        fi
+
+        BAD=""
+        FOUND=0
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          FOUND=1
+          if ! HOSTS=$(python3 "$SCAN" "$f"); then
+            echo "::error file=${f}::could not read dist hosts from ${f}"
+            exit 1
+          fi
+          for h in $HOSTS; do
+            echo "$h" | grep -qE "^($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
+          done
+        done < <(git ls-files 'composer.lock' '**/composer.lock' 2>/dev/null)
+        if [ "$FOUND" -eq 0 ]; then
+          echo "::notice::no composer.lock tracked; nothing to scan"
+        elif [ -n "$BAD" ]; then
+          echo "::error::Non-public dist hosts found in composer.lock; external consumers cannot install. Regenerate the lockfile against public Packagist:"
+          printf '%s' "$BAD"
+          exit 1
+        else
+          echo "::notice::composer.lock scan OK — all dist/source hosts are public"
+        fi
+
+    - name: Sanity-check composer.json
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      run: |
+        FAIL=0
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+
+          # A `repositories` block committed to a public package would ship an
+          # internal hostname to consumers. Curated resolution belongs in CI
+          # global config (see the artifactory-oidc action), never in the repo.
+          if python3 -c "import json,sys; sys.exit(0 if 'repositories' in json.load(open('$f')) else 1)"; then
+            echo "::error file=${f}::${f} defines a repositories block. Configure curated Artifactory resolution in CI (artifactory-oidc writes Composer GLOBAL config) instead of committing it."
+            FAIL=1
+          fi
+
+          # Packagist derives the version from the git tag. A hardcoded `version`
+          # silently diverges from the tag it is published under.
+          if python3 -c "import json,sys; sys.exit(0 if 'version' in json.load(open('$f')) else 1)"; then
+            echo "::error file=${f}::${f} declares a version field. Remove it — Packagist derives the version from the git tag."
+            FAIL=1
+          fi
+        done < <(git ls-files 'composer.json' 2>/dev/null)
+        [ "$FAIL" -eq 0 ] || exit 1
+        echo "::notice::composer.json sanity checks OK"
+
+    - name: Set up PHP (public Packagist)
+      if: ${{ inputs.clean-room == 'true' }}
+      uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+      with:
+        php-version: ${{ inputs.php-version }}
+        coverage: none
+
+    - name: Clean-room public install
+      if: ${{ inputs.clean-room == 'true' }}
+      shell: bash
+      env:
+        INSTALL_OVERRIDE: ${{ inputs.install-command }}
+      run: |
+        # Hermetic COMPOSER_HOME so ambient Twilio Composer config (a mirror in
+        # global config, an auth.json) cannot mask an unresolvable lockfile.
+        # A host-clean lockfile can still fail here if a pinned version was never
+        # published publicly — which is exactly what this proves.
+        export COMPOSER_HOME="${RUNNER_TEMP}/composer-clean-room"
+        mkdir -p "$COMPOSER_HOME"
+        if [ -n "$INSTALL_OVERRIDE" ]; then
+          eval "$INSTALL_OVERRIDE"
+        else
+          composer install --no-interaction --no-progress --no-scripts
+        fi
+        echo "::notice::clean-room public install succeeded"

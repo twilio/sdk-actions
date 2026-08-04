@@ -1,0 +1,15 @@
+{
+    "name": "twilio/fixture-repositories-block",
+    "description": "Fixture: committed repositories override. Scanner must FAIL.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "psr/log": "3.0.2"
+    },
+    "repositories": [
+        {
+            "type": "composer",
+            "url": "https://twilio.jfrog.io/artifactory/api/composer/virtual-php-thirdparty"
+        }
+    ]
+}

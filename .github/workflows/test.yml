@@ -1,0 +1,274 @@
+name: Test
+
+# Self-tests for the actions in this repo.
+#
+# SCOPE — read before trusting a green run:
+#   * `composer-lockfile-hygiene` is tested end-to-end (scan + clean room).
+#   * `artifactory-oidc` is NOT exercised here. It needs a live Artifactory OIDC
+#     token exchange, and this repo is not in Artifactory's `trusted_builds`
+#     (only consumer SDK repos are), so the exchange cannot succeed from here.
+#     That path is proven by the first consumer CI run — see the PHP section of
+#     the README.
+#
+# RUNNER LABEL: ubuntu-x64, not ubuntu-latest. The twilio org does not serve
+# ubuntu-latest for same-repo jobs — a job requesting it sits in `queued`
+# indefinitely with no error and no annotation. ubuntu-latest is only correct as
+# the FORK fallback (see the README examples), because forks can't use the
+# internal runner group.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Each fixture asserts an EXPECTED outcome, so a gate that stops failing is
+  # caught just as loudly as one that starts failing on good input.
+  # ---------------------------------------------------------------------------
+  composer-hygiene-scan:
+    name: composer-hygiene (${{ matrix.case }} → ${{ matrix.expect }})
+    runs-on: ubuntu-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: clean
+            expect: success
+          - case: internal-host
+            expect: failure
+          - case: repositories-block
+            expect: failure
+          - case: pinned-version
+            expect: failure
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Stage fixture at the repo root
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          # The action scans via `git ls-files`, so the fixture has to be staged,
+          # not just present. Runner checkout is ephemeral, so mutating it is fine.
+          #
+          # Untrack the fixture tree FIRST: the action scans '**/composer.lock',
+          # which would otherwise pick up the *other* fixtures and make every
+          # case fail on the internal-host one.
+          git rm -r --cached -q test/fixtures
+          cp "test/fixtures/composer/${CASE}/composer.json" composer.json
+          cp "test/fixtures/composer/${CASE}/composer.lock" composer.lock
+          git add composer.json composer.lock
+          echo "Staged fixture: ${CASE}"
+          echo "Tracked composer files now visible to the scan:"
+          git ls-files 'composer.json' 'composer.lock' '**/composer.lock'
+
+      - id: hygiene
+        continue-on-error: true
+        uses: ./composer-lockfile-hygiene
+        with:
+          # Scan only. The clean-room path needs real resolvable packages and is
+          # covered by the dedicated job below.
+          clean-room: 'false'
+
+      - name: Assert outcome
+        env:
+          ACTUAL: ${{ steps.hygiene.outcome }}
+          EXPECTED: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::fixture '${{ matrix.case }}' expected the gate to $EXPECTED but it was $ACTUAL"
+            exit 1
+          fi
+          echo "OK — fixture '${{ matrix.case }}' produced the expected outcome: $ACTUAL"
+
+  # ---------------------------------------------------------------------------
+  # Clean-room path, against real packages from public Packagist. The lockfile is
+  # generated here rather than committed so the test proves a genuine public
+  # resolve instead of replaying hand-written hashes.
+  # ---------------------------------------------------------------------------
+  composer-hygiene-clean-room:
+    name: composer-hygiene (clean room, real packages)
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Generate a real public lockfile
+        run: |
+          set -euo pipefail
+          # Untrack the committed fixtures so the scan sees only what we generate
+          # here (the internal-host fixture would otherwise fail the gate).
+          git rm -r --cached -q test/fixtures
+          cat > composer.json <<'JSON'
+          {
+              "name": "twilio/fixture-clean-room",
+              "description": "Generated in CI to prove a real public resolve.",
+              "type": "library",
+              "license": "MIT",
+              "require": { "psr/log": "^3.0" }
+          }
+          JSON
+          composer update --no-interaction --no-progress --no-install
+          git add composer.json composer.lock
+          echo "dist hosts in the generated lockfile:"
+          python3 -c "
+          import json
+          from urllib.parse import urlparse
+          d = json.load(open('composer.lock'))
+          for p in d.get('packages') or []:
+              print(' ', p['name'], urlparse(p['dist']['url']).netloc)
+          "
+
+      - name: Hygiene gate must pass on a genuinely public lockfile
+        uses: ./composer-lockfile-hygiene
+        with:
+          clean-room: 'true'
+
+  # ---------------------------------------------------------------------------
+  # semantic-pr-title: table-driven, so both directions are covered — a good
+  # title must pass AND a bad one must fail.
+  # ---------------------------------------------------------------------------
+  semantic-pr-title:
+    name: semantic-pr-title (table)
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Valid and invalid titles behave as expected
+        env:
+          TYPES: |
+            chore
+            docs
+            fix
+            feat
+            misc
+            test
+        run: |
+          set -euo pipefail
+          TYPE_ALT="$(printf '%s' "$TYPES" | tr ',' '\n' \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^$' | paste -sd '|' -)"
+          RE="^(${TYPE_ALT})(\([a-z0-9][a-z0-9._/-]*\))?!?: .{3,}\$"
+
+          fail=0
+          assert() { # assert <expected pass|fail> <title>
+            if [[ "$2" =~ $RE ]]; then got=pass; else got=fail; fi
+            if [ "$got" != "$1" ]; then
+              echo "::error::expected $1 but got $got for: $2"; fail=1
+            else
+              echo "  ok ($got) $2"
+            fi
+          }
+
+          assert pass 'fix: correct retry backoff'
+          assert pass 'feat(http): add messaging v2 client'
+          assert pass 'chore!: drop PHP 7.2 support'
+          assert pass 'feat(api)!: breaking change'
+          assert fail 'Fix ScopeURI parsing'
+          assert fail 'fix:no space'
+          assert fail 'bogus: not a real type'
+          assert fail 'fix: ab'
+          assert fail 'feat(BadScope): uppercase scope'
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "::notice::semantic-pr-title regex behaves correctly in both directions"
+
+  # ---------------------------------------------------------------------------
+  # github-release: exercise the changelog extractor against every heading shape
+  # it claims to support. Creating a real release is not testable here.
+  # ---------------------------------------------------------------------------
+  github-release-notes:
+    name: github-release (changelog extraction)
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Extractor picks the right section for each heading style
+        run: |
+          set -euo pipefail
+          extract() { # extract <version> <file>
+            awk -v want="$1" '
+              function is_heading(line) {
+                return (line ~ /^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}\]?[[:space:]]*Version[[:space:]]+[0-9]/) ||
+                       (line ~ /^#{1,3}[[:space:]]*\[?[0-9]+\.[0-9]+/)
+              }
+              function names_want(line) {
+                return is_heading(line) && line ~ ("(^|[^0-9.])" want "([^0-9.]|$)")
+              }
+              !found && names_want($0) { found = 1; next }
+              found && is_heading($0)  { exit }
+              found && $0 ~ /^[-=]+$/ && !body { next }
+              found { if ($0 != "" || body) { print; body = 1 } }
+            ' "$2"
+          }
+
+          # twilio SDK style
+          cat > sdk.md <<'MD'
+          [2026-05-07] Version 8.11.6
+          ---------------------------
+          - six only
+          [2026-05-06] Version 8.11.5
+          ---------------------------
+          - five only
+          MD
+          # keep-a-changelog style
+          cat > kac.md <<'MD'
+          ## [2.1.0] - 2026-05-07
+          - two-one only
+          ## [2.0.0] - 2026-01-01
+          - two-zero only
+          MD
+
+          fail=0
+          check() { # check <desc> <expected> <actual>
+            if [ "$2" = "$3" ]; then echo "  ok  $1"; else
+              echo "::error::$1 — expected [$2] got [$3]"; fail=1; fi
+          }
+          check "sdk 8.11.6"      "- six only"      "$(extract 8.11.6 sdk.md)"
+          check "sdk 8.11.5"      "- five only"     "$(extract 8.11.5 sdk.md)"
+          check "kac 2.1.0"       "- two-one only"  "$(extract 2.1.0 kac.md)"
+          check "kac 2.0.0"       "- two-zero only" "$(extract 2.0.0 kac.md)"
+          check "missing version" ""                "$(extract 9.9.9 sdk.md)"
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "::notice::changelog extraction correct for all supported heading shapes"
+
+  # ---------------------------------------------------------------------------
+  # artifactory-oidc: only the pre-flight validation that runs BEFORE the token
+  # exchange can be tested here. The exchange itself needs `trusted_builds`
+  # membership this repo does not have.
+  # ---------------------------------------------------------------------------
+  artifactory-oidc-preflight:
+    name: artifactory-oidc (rejects unknown ecosystem)
+    runs-on: ubuntu-x64
+    permissions:
+      contents: read
+      id-token: write # get past the OIDC-availability check to reach validation
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - id: bogus
+        continue-on-error: true
+        uses: ./artifactory-oidc
+        with:
+          ecosystem: definitely-not-a-real-ecosystem
+
+      - name: Assert it failed closed
+        env:
+          ACTUAL: ${{ steps.bogus.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTUAL" != "failure" ]; then
+            echo "::error::an unknown ecosystem must fail closed, but the action reported: $ACTUAL"
+            exit 1
+          fi
+          echo "OK — unknown ecosystem rejected."
