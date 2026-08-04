@@ -94,9 +94,6 @@ runs:
         fi
         echo "::add-mask::$ART_TOKEN"
 
-        # CGI escape the username for the Bundler mirror URL
-        ART_USER=$(echo "$RESP" | jq -r '.username // empty' | sed 's/\//%2F/g')
-
         # 3. Point the package manager at the curated Artifactory registry.
         HOST=$(echo "${ARTIFACTORY_URL}" | sed -E 's#^https?://##')
         case "$ECOSYSTEM" in
@@ -121,7 +118,8 @@ runs:
             echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
             ;;
           ruby)
-            MIRROR_URL="https://${ART_USER}:${ART_TOKEN}@${HOST}/artifactory/api/gems/${REGISTRY_PATH}/"
+            ART_USER_ESCAPED=$(printf '%s' "$ART_USERNAME" | sed 's/\//%2F/g')
+            MIRROR_URL="https://${ART_USERNAME}:${ART_TOKEN}@${HOST}/artifactory/api/gems/${REGISTRY_PATH}/"
             echo "::add-mask::${MIRROR_URL}"
             echo "BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=${MIRROR_URL}" >> "$GITHUB_ENV"
             echo "::notice::Bundler configured to mirror rubygems.org through Artifactory (${REGISTRY_PATH})"
@@ -159,6 +157,6 @@ runs:
             echo "::notice::composer configured to resolve through Artifactory (${REGISTRY_PATH})"
             ;;
           dotnet)
-            nuget sources Add -Name Artifactory -Source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --username ART_USERNAME --password "${ART_TOKEN}" --StorePasswordInClearText
+            nuget sources Add -Name Artifactory -Source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --username "${ART_USERNAME}" --password "${ART_TOKEN}" --StorePasswordInClearText
             ;;
         esac
