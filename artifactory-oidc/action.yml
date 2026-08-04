@@ -104,11 +104,11 @@ runs:
             echo "::notice::uv and pip configured to resolve through Artifactory (${REGISTRY_PATH})"
             ;;
           ruby)
-            MIRROR_URL="https://:${ART_TOKEN}@${HOST}/artifactory/${REGISTRY_PATH}/"
-            echo "::add-mask::${MIRROR_URL}"
+            MIRROR_URL="https://${HOST}/artifactory/${REGISTRY_PATH}/"
+            echo "::add-mask::${ART_TOKEN}"
             echo "BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=${MIRROR_URL}" >> "$GITHUB_ENV"
-            # Artifactory returns MD5 ETags; Bundler expects SHA1 — skip validation to avoid fallback
-            echo "BUNDLE_DISABLE_CHECKSUM_VALIDATION=true" >> "$GITHUB_ENV"
+            CRED_KEY=$(echo "$HOST" | sed 's/\./__/g; s/-/___/g' | tr '[:lower:]' '[:upper:]')
+            echo "BUNDLE_${CRED_KEY}=:${ART_TOKEN}" >> "$GITHUB_ENV"
             echo "::notice::Bundler configured to mirror rubygems.org through Artifactory (${REGISTRY_PATH})"
             ;;
         esac
