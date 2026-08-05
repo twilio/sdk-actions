@@ -1,0 +1,69 @@
+name: "gems lockfile hygiene"
+description: >-
+  Supply-chain gate for public Ruby gems. (1) Scan tracked Gemfile.lock for
+  non-public registry hosts; (2) optionally prove the committed lockfile
+  installs from PUBLIC rubygems.org only. Secret-less — safe on forks. Drop
+  into its OWN job for a true clean room.
+
+inputs:
+  scan:
+    description: "Run the non-public-host scan."
+    required: false
+    default: "true"
+  clean-room:
+    description: "Run the public-only install to prove external installability."
+    required: false
+    default: "true"
+  allow-hosts:
+    description: 'Extra hosts to allow, pipe-separated regex (e.g. my-mirror\.example\.com).'
+    required: false
+    default: ""
+  ruby-version:
+    description: "Ruby version for the clean-room install."
+    required: false
+    default: "3.2"
+
+runs:
+  using: composite
+  steps:
+    - name: Scan Gemfile.lock for non-public registry hosts
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      env:
+        EXTRA_ALLOW: ${{ inputs.allow-hosts }}
+      run: |
+        ALLOW='rubygems\.org|github\.com|codeload\.github\.com'
+        [ -n "$EXTRA_ALLOW" ] && ALLOW="${ALLOW}|${EXTRA_ALLOW}"
+        BAD=""
+        FOUND=0
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          FOUND=1
+          HOSTS=$( { grep -oE 'https?://[^"'\'' ,)}!]+' "$f" 2>/dev/null || true; } \
+            | sed -E 's#^(https?://[^/]+).*#\1#' | sort -u)
+          for h in $HOSTS; do
+            echo "$h" | grep -qE "://($ALLOW)$" || BAD="${BAD}${f}: ${h}"$'\n'
+          done
+        done < <(git ls-files '*Gemfile.lock' 2>/dev/null)
+        if [ "$FOUND" -eq 0 ]; then
+          echo "::notice::no Gemfile.lock tracked; nothing to scan"
+        elif [ -n "$BAD" ]; then
+          echo "::error::Non-public registry hosts found in Gemfile.lock; external consumers cannot install. Rewrite these to rubygems.org:"
+          printf '%s' "$BAD"
+          exit 1
+        else
+          echo "::notice::lockfile scan OK — all resolved hosts are public"
+        fi
+
+    - name: Set up Ruby
+      if: ${{ inputs.clean-room == 'true' }}
+      uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+
+    - name: Clean-room public install
+      if: ${{ inputs.clean-room == 'true' }}
+      shell: bash
+      run: |
+        bundle install --frozen --jobs 4
+        echo "::notice::clean-room public install succeeded"

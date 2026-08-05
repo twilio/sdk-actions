@@ -1,0 +1,14 @@
+GEM
+  remote: https://twilio.jfrog.io/artifactory/api/gems/virtual-gems-thirdparty/
+  specs:
+    rake (13.2.1)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  rake (~> 13.0)
+
+BUNDLED WITH
+   2.7.2
