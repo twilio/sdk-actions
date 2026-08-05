@@ -139,11 +139,12 @@ jobs:
       - run: composer test
 ```
 
-## Compose them: CI (Ruby)
+## Compose them: CI & Publish (Ruby)
 
 Pass `ecosystem: ruby` to `artifactory-oidc` (it sets Bundler mirror + per-host
-credentials so `bundle install` resolves through Artifactory), and use
-`gems-lockfile-hygiene` for the supply-chain gate.
+credentials so `bundle install` resolves through Artifactory), use
+`gems-lockfile-hygiene` for the supply-chain gate, and publish via RubyGems OIDC
+trusted publishing with `rubygems/release-gem` — no API key needed.
 
 ```yaml
 # .github/workflows/ci.yml — you write and own this
@@ -175,15 +176,23 @@ jobs:
           bundler: '2'
       - run: bundle install --jobs 4
       - run: bundle exec rake
+
+  # Publish on tag push. rubygems/release-gem handles OIDC exchange + gem build + push.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-x64
+    environment: production                   # must match rubygems.org trusted publisher
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      - uses: ruby/setup-ruby@<sha>           # v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+      - uses: rubygems/release-gem@<sha>      # v1.4.0
 ```
-
-### Publishing Ruby: RubyGems trusted publishing
-
-RubyGems supports OIDC trusted publishing — no API key needed. Register a
-trusted publisher on rubygems.org (owner, repo, workflow, environment), then
-`gem push` inside a job with `id-token: write` + `environment: production`
-authenticates automatically. There is no `gems-publish` action because the
-standard `gem push` handles it.
 
 ### Publishing PHP: there is no publish step
 
