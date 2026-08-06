@@ -1,0 +1,2 @@
+source 'https://twilio.jfrog.io/artifactory/api/gems/virtual-gems-thirdparty/'
+gem 'rake', '~> 13.0'

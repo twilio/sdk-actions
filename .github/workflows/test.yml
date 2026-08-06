@@ -4,6 +4,7 @@ name: Test
 #
 # SCOPE — read before trusting a green run:
 #   * `composer-lockfile-hygiene` is tested end-to-end (scan + clean room).
+#   * `gems-lockfile-hygiene` is tested end-to-end (scan + clean room).
 #   * `artifactory-oidc` is NOT exercised here. It needs a live Artifactory OIDC
 #     token exchange, and this repo is not in Artifactory's `trusted_builds`
 #     (only consumer SDK repos are), so the exchange cannot succeed from here.
@@ -73,7 +74,7 @@ jobs:
         with:
           # Scan only. The clean-room path needs real resolvable packages and is
           # covered by the dedicated job below.
-          clean-room: 'false'
+          clean-room: "false"
 
       - name: Assert outcome
         env:
@@ -100,7 +101,7 @@ jobs:
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
-          php-version: '8.3'
+          php-version: "8.3"
           coverage: none
 
       - name: Generate a real public lockfile
@@ -132,7 +133,85 @@ jobs:
       - name: Hygiene gate must pass on a genuinely public lockfile
         uses: ./composer-lockfile-hygiene
         with:
-          clean-room: 'true'
+          clean-room: "true"
+
+  # ---------------------------------------------------------------------------
+  # gems-lockfile-hygiene: scan fixtures assert expected pass/fail.
+  # ---------------------------------------------------------------------------
+  gems-hygiene-scan:
+    name: gems-hygiene (${{ matrix.case }} → ${{ matrix.expect }})
+    runs-on: ubuntu-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: clean
+            expect: success
+          - case: internal-host
+            expect: failure
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Stage fixture at the repo root
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          git rm -r --cached -q test/fixtures
+          cp "test/fixtures/gems/${CASE}/Gemfile" Gemfile
+          cp "test/fixtures/gems/${CASE}/Gemfile.lock" Gemfile.lock
+          git add Gemfile Gemfile.lock
+          echo "Staged fixture: ${CASE}"
+          git ls-files 'Gemfile.lock' '**/Gemfile.lock'
+
+      - id: hygiene
+        continue-on-error: true
+        uses: ./gems-lockfile-hygiene
+        with:
+          clean-room: "false"
+
+      - name: Assert outcome
+        env:
+          ACTUAL: ${{ steps.hygiene.outcome }}
+          EXPECTED: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::fixture '${{ matrix.case }}' expected the gate to $EXPECTED but it was $ACTUAL"
+            exit 1
+          fi
+          echo "OK — fixture '${{ matrix.case }}' produced the expected outcome: $ACTUAL"
+
+  # ---------------------------------------------------------------------------
+  # gems-lockfile-hygiene clean room: real packages from public rubygems.org.
+  # ---------------------------------------------------------------------------
+  gems-hygiene-clean-room:
+    name: gems-hygiene (clean room, real packages)
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Generate a real public lockfile
+        run: |
+          set -euo pipefail
+          git rm -r --cached -q test/fixtures
+          cat > Gemfile <<'RUBY'
+          source 'https://rubygems.org'
+          gem 'rake', '~> 13.0'
+          RUBY
+          bundle lock
+          git add Gemfile Gemfile.lock
+          echo "remotes in the generated lockfile:"
+          grep 'remote:' Gemfile.lock
+
+      - name: Hygiene gate must pass on a genuinely public lockfile
+        uses: ./gems-lockfile-hygiene
+        with:
+          clean-room: "true"
 
   # ---------------------------------------------------------------------------
   # semantic-pr-title: table-driven, so both directions are covered — a good

@@ -4,16 +4,17 @@ Small, composable GitHub Actions for building and publishing Twilio's public
 SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
 Drop them into your own `ci.yml` / `publish.yml` as steps — there is no
 black-box pipeline to adopt. `artifactory-oidc` and lockfile hygiene cover npm,
-Python (uv), and PHP (Composer); `npm-publish` is npm-specific.
+Python (uv), PHP (Composer), and Ruby (Bundler); `npm-publish` is npm-specific.
 
 ## The actions
 
 | Action | What it does |
 |--------|--------------|
-| [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points your package manager at the curated registry — npm via `~/.npmrc`, Python (`ecosystem: python`) via `UV_INDEX_URL` / `PIP_INDEX_URL`, or PHP (`ecosystem: php`) via Composer global config. No stored secret. |
+| [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points your package manager at the curated registry — npm via `~/.npmrc`, Python (`ecosystem: python`) via `UV_INDEX_URL` / `PIP_INDEX_URL`, PHP (`ecosystem: php`) via Composer global config, or Ruby (`ecosystem: ruby`) via Bundler mirror + per-host credentials. No stored secret. |
 | [`npm-lockfile-hygiene`](npm-lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
 | [`uv-lockfile-hygiene`](uv-lockfile-hygiene/action.yml) | Same gate for Python (uv): scans `uv.lock` / `requirements*.txt` and clean-room installs with `uv sync --frozen` from public PyPI. Secret-less — safe on forks. Pass `no-build: true` for a wheels-only install so no dependency build backend executes. |
 | [`composer-lockfile-hygiene`](composer-lockfile-hygiene/action.yml) | Same gate for PHP: scans `composer.lock` dist/source hosts, rejects a committed `repositories` block or hardcoded `version` in `composer.json`, and clean-room installs from public Packagist. Secret-less — safe on forks. |
+| [`gems-lockfile-hygiene`](gems-lockfile-hygiene/action.yml) | Same gate for Ruby: scans `Gemfile.lock` for non-public hosts and clean-room installs with `bundle install --frozen` from public rubygems.org. Secret-less — safe on forks. |
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 | [`github-release`](github-release/action.yml) | Creates (or updates) a GitHub Release for a tag, with notes lifted from the changelog. Pure `gh` + `awk`. |
 | [`semantic-pr-title`](semantic-pr-title/action.yml) | Checks a PR title against Conventional Commits. Pure bash. |
@@ -136,6 +137,61 @@ jobs:
           ecosystem: php
       - run: composer install --no-interaction --no-progress
       - run: composer test
+```
+
+## Compose them: CI & Publish (Ruby)
+
+Pass `ecosystem: ruby` to `artifactory-oidc` (it sets Bundler mirror + per-host
+credentials so `bundle install` resolves through Artifactory), use
+`gems-lockfile-hygiene` for the supply-chain gate, and publish via RubyGems OIDC
+trusted publishing with `rubygems/release-gem` — no API key needed.
+
+```yaml
+# .github/workflows/ci.yml — you write and own this
+jobs:
+  # Secret-less gate — its own job so the clean-room install is truly isolated.
+  gems-lockfile-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      - uses: twilio/sdk-actions/gems-lockfile-hygiene@<sha>
+
+  test:
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    permissions:
+      contents: read
+      id-token: write                         # needed for the OIDC login below
+    strategy:
+      matrix: { ruby: ['3.1', '3.2', '3.3'] }
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      # Forks have no Artifactory secret; skip login and resolve from public rubygems.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@<sha>
+        with:
+          ecosystem: ruby
+      - uses: ruby/setup-ruby@<sha>           # v1
+        with:
+          ruby-version: '${{ matrix.ruby }}'
+          bundler: '2'
+      - run: bundle install --jobs 4
+      - run: bundle exec rake
+
+  # Publish on tag push. rubygems/release-gem handles OIDC exchange + gem build + push.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-x64
+    environment: production                   # must match rubygems.org trusted publisher
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@<sha>          # v4
+      - uses: ruby/setup-ruby@<sha>           # v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+      - uses: rubygems/release-gem@<sha>      # v1.4.0
 ```
 
 ### Publishing PHP: there is no publish step
