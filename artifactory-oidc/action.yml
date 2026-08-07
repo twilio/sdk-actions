@@ -55,7 +55,8 @@ runs:
             ruby)   REGISTRY_PATH='virtual-gems-thirdparty' ;;
             php)    REGISTRY_PATH='virtual-php-thirdparty' ;;
             dotnet) REGISTRY_PATH='virtual-nuget-thirdparty' ;;
-            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', or 'dotnet')"; exit 1 ;;
+            maven)   REGISTRY_PATH='virtual-maven-thirdparty' ;;
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', 'maven', or 'dotnet')"; exit 1 ;;
           esac
         fi
 
@@ -160,5 +161,15 @@ runs:
             ;;
           dotnet)
             nuget sources Add -Name Artifactory -Source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --username "${ART_USERNAME}" --password "${ART_TOKEN}" --StorePasswordInClearText
+            ;;
+          maven)
+            mkdir -p ~/.m2/
+            # Pass vars explicitly into envsubst's environment so the child process can see them.
+            ART_USERNAME="$ART_USERNAME" \
+            ART_TOKEN="$ART_TOKEN" \
+            ARTIFACTORY_URL="$ARTIFACTORY_URL" \
+            REGISTRY_PATH="$REGISTRY_PATH" \
+              envsubst < "$GITHUB_ACTION_PATH/maven-settings.xml.tmpl" > ~/.m2/settings.xml
+            echo "::notice::Maven configured to use Artifactory registry (${REGISTRY_PATH})"
             ;;
         esac
