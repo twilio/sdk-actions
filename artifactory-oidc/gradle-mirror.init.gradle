@@ -3,10 +3,10 @@
     To not force all projects to use one repository to rule them all, we break
     them out per remote repository.
  */
-def KNOWN_REPOS = [
-    [name: 'Google',                           public_url: 'https://dl.google.com/dl/android/maven2/', artifactory_repo: 'virtual-maven-thirdparty'],
+def MIRRORS = [
     [name: 'MavenRepo',                        public_url: 'https://repo.maven.apache.org/maven2/',    artifactory_repo: 'virtual-maven-thirdparty'],
-    [name: 'Gradle Central Plugin Repository', public_url: 'https://plugins.gradle.org/m2/',           artifactory_repo: 'virtual-maven-thirdparty'], // TODO Fix after adding repos
+    [name: 'Google',                           public_url: 'https://dl.google.com/dl/android/maven2/', artifactory_repo: 'remote-maven-google'],
+    [name: 'Gradle Central Plugin Repository', public_url: 'https://plugins.gradle.org/m2/',           artifactory_repo: 'remote-maven-gradle-plugins'],
 ]
 
 def propsFile = new File(gradle.gradleUserHomeDir, 'artifactoryoidc.properties')
@@ -40,7 +40,7 @@ def substituteRepos = { repos, label ->
         // TODO: URL suffix after the matched base is currently discarded. If a repo URL has a
         // meaningful suffix (e.g. https://example.com/repo/releases), the mirror URL will not
         // include it. Handle by capturing and appending the suffix if this becomes an issue.
-        def match = KNOWN_REPOS.find { mirror ->
+        def match = MIRRORS.find { mirror ->
             (mirror.name && repo.name == mirror.name) || repo.url?.toString()?.startsWith(mirror.public_url)
         }
         if (match) {
