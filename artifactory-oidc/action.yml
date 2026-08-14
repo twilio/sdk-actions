@@ -56,7 +56,7 @@ runs:
             php)    REGISTRY_PATH='virtual-php-thirdparty' ;;
             dotnet) REGISTRY_PATH='virtual-nuget-thirdparty' ;;
             maven)   REGISTRY_PATH='virtual-maven-thirdparty' ;;
-            gradle) ;;  # repos are defined in gradle-mirror.init.gradle, not here
+            gradle) ;;  # repos are defined in gradle-mirrors.init.gradle, not here
             *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', 'maven', 'gradle', or 'dotnet')"; exit 1 ;;
           esac
         fi
@@ -175,7 +175,7 @@ runs:
             ;;
           gradle)
             mkdir -p ~/.gradle/init.d/
-            cp "$GITHUB_ACTION_PATH/gradle-mirror.init.gradle" ~/.gradle/init.d/mirrors.init.gradle
+            cp "$GITHUB_ACTION_PATH/gradle-mirrors.init.gradle" ~/.gradle/init.d/mirrors.init.gradle
             printf 'url=%s\nusername=%s\ntoken=%s\n' "$ARTIFACTORY_URL" "$ART_USERNAME" "$ART_TOKEN" > ~/.gradle/artifactoryoidc.properties
             echo "::notice::Gradle init file added to overwrite repositories on Gradle runs (${ARTIFACTORY_URL})"
             ;;
