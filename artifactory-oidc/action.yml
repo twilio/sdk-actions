@@ -160,7 +160,7 @@ runs:
             echo "::notice::composer configured to resolve through Artifactory (${REGISTRY_PATH})"
             ;;
           dotnet)
-            nuget sources Add -Name Artifactory -Source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --username "${ART_USERNAME}" --password "${ART_TOKEN}" --StorePasswordInClearText
+            dotnet nuget add source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --name Artifactory --username "${ART_USERNAME}" --password "${ART_TOKEN}" --store-password-in-clear-text
             ;;
           maven)
             mkdir -p ~/.m2/
