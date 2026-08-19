@@ -5,6 +5,9 @@ name: Test
 # SCOPE — read before trusting a green run:
 #   * `composer-lockfile-hygiene` is tested end-to-end (scan + clean room).
 #   * `gems-lockfile-hygiene` is tested end-to-end (scan + clean room).
+#   * `go-lockfile-hygiene` is tested end-to-end (scan + clean room). The
+#     semantic-import-version rule is table-tested separately, because it only
+#     fires on a tag ref and a PR run never has one.
 #   * `artifactory-oidc` is NOT exercised here. It needs a live Artifactory OIDC
 #     token exchange, and this repo is not in Artifactory's `trusted_builds`
 #     (only consumer SDK repos are), so the exchange cannot succeed from here.
@@ -212,6 +215,150 @@ jobs:
         uses: ./gems-lockfile-hygiene
         with:
           clean-room: "true"
+
+  # ---------------------------------------------------------------------------
+  # go-lockfile-hygiene: scan fixtures assert expected pass/fail.
+  # ---------------------------------------------------------------------------
+  go-hygiene-scan:
+    name: go-hygiene (${{ matrix.case }} → ${{ matrix.expect }})
+    runs-on: ubuntu-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: clean
+            expect: success
+          - case: internal-host
+            expect: failure
+          - case: replace-directive
+            expect: failure
+          - case: wrong-module-path
+            expect: failure
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Stage fixture at the repo root
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          # The action scans via `git ls-files`, so the fixture has to be staged.
+          # Untrack the fixture tree FIRST — the action scans '**/go.mod', which
+          # would otherwise pick up the other fixtures and fail every case.
+          git rm -r --cached -q test/fixtures
+          cp "test/fixtures/go/${CASE}/go.mod" go.mod
+          git add go.mod
+          echo "Staged fixture: ${CASE}"
+          git ls-files 'go.mod' '**/go.mod'
+
+      - id: hygiene
+        continue-on-error: true
+        uses: ./go-lockfile-hygiene
+        with:
+          # Scan only. The clean-room path needs a real resolvable module graph
+          # and is covered by the dedicated job below.
+          clean-room: "false"
+
+      - name: Assert outcome
+        env:
+          ACTUAL: ${{ steps.hygiene.outcome }}
+          EXPECTED: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::fixture '${{ matrix.case }}' expected the gate to $EXPECTED but it was $ACTUAL"
+            exit 1
+          fi
+          echo "OK — fixture '${{ matrix.case }}' produced the expected outcome: $ACTUAL"
+
+  # ---------------------------------------------------------------------------
+  # go-lockfile-hygiene clean room: a real module graph from the public proxy.
+  # Generated here rather than committed so the test proves a genuine public
+  # resolve instead of replaying hand-written hashes.
+  # ---------------------------------------------------------------------------
+  go-hygiene-clean-room:
+    name: go-hygiene (clean room, real modules)
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Generate a real public module
+        run: |
+          set -euo pipefail
+          git rm -r --cached -q test/fixtures
+          # Module path must match this repo — the gate checks it.
+          go mod init "github.com/${GITHUB_REPOSITORY}"
+          mkdir -p hygienecheck
+          cat > hygienecheck/check.go <<'GO'
+          // Package hygienecheck exists only so `go build ./...` has something to
+          // compile against a real, publicly-resolved dependency.
+          package hygienecheck
+
+          import "github.com/pkg/errors"
+
+          // Wrap annotates err so the import is genuinely used.
+          func Wrap(err error, msg string) error { return errors.Wrap(err, msg) }
+          GO
+          go get github.com/pkg/errors@v0.9.1
+          go mod tidy
+          git add go.mod go.sum hygienecheck/check.go
+          echo "module graph:"
+          go list -m all
+
+      - name: Hygiene gate must pass on a genuinely public module
+        uses: ./go-lockfile-hygiene
+        with:
+          clean-room: "true"
+
+  # ---------------------------------------------------------------------------
+  # go-lockfile-hygiene: semantic import versioning. Table-driven because the
+  # rule only fires on a tag ref, and a PR run never has one.
+  # ---------------------------------------------------------------------------
+  go-hygiene-semver-suffix:
+    name: go-hygiene (semantic import versioning table)
+    runs-on: ubuntu-x64
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: /vN suffix must agree with the tag's major version
+        run: |
+          set -euo pipefail
+          # Mirrors the check in go-lockfile-hygiene/action.yml. Keep in sync.
+          verdict() { # verdict <module-path> <tag>
+            local MOD="$1" TAG="$2" MAJOR SUFFIX
+            MAJOR=$(printf '%s' "$TAG" | sed -nE 's#^v?([0-9]+)\..*#\1#p')
+            SUFFIX=$(printf '%s' "$MOD" | sed -nE 's#.*/v([0-9]+)$#\1#p')
+            [ -n "$MAJOR" ] || { echo skip; return; }
+            if [ "$MAJOR" -ge 2 ] && [ "$SUFFIX" != "$MAJOR" ]; then echo fail
+            elif [ "$MAJOR" -lt 2 ] && [ -n "$SUFFIX" ]; then echo fail
+            else echo pass; fi
+          }
+
+          fail=0
+          assert() { # assert <expected> <module-path> <tag>
+            got=$(verdict "$2" "$3")
+            if [ "$got" != "$1" ]; then
+              echo "::error::expected $1 but got $got for module '$2' at tag $3"; fail=1
+            else
+              echo "  ok ($got) $2 @ $3"
+            fi
+          }
+
+          assert pass 'github.com/twilio/twilio-go'    v1.30.9
+          assert pass 'github.com/twilio/twilio-go'    v0.9.0
+          assert pass 'github.com/twilio/twilio-go/v2' v2.0.0
+          assert pass 'github.com/twilio/twilio-go/v3' v3.1.4
+          assert fail 'github.com/twilio/twilio-go'    v2.0.0
+          assert fail 'github.com/twilio/twilio-go/v2' v1.4.0
+          assert fail 'github.com/twilio/twilio-go/v3' v2.0.0
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "::notice::semantic import versioning rule behaves correctly in both directions"
 
   # ---------------------------------------------------------------------------
   # semantic-pr-title: table-driven, so both directions are covered — a good
