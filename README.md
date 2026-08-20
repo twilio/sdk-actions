@@ -166,7 +166,7 @@ jobs:
       - uses: twilio/sdk-actions/gems-lockfile-hygiene@<sha>
 
   test:
-    runs-on: ubuntu-x64
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     permissions:
       contents: read
       id-token: write                         # needed for the OIDC login below
@@ -174,7 +174,9 @@ jobs:
       matrix: { ruby: ['3.1', '3.2', '3.3'] }
     steps:
       - uses: actions/checkout@<sha>
-      - uses: twilio/sdk-actions/artifactory-oidc@<sha>
+      # Forks have no Artifactory secret; skip login and resolve from public rubygems.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@<sha>
         with:
           ecosystem: ruby
       - uses: ruby/setup-ruby@<sha>
