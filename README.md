@@ -146,6 +146,15 @@ credentials so `bundle install` resolves through Artifactory), use
 `gems-lockfile-hygiene` for the supply-chain gate, and publish via RubyGems OIDC
 trusted publishing with `rubygems/release-gem` — no API key needed.
 
+If your repo uses tags without a `v` prefix (e.g., `7.11.1` instead of
+`v7.11.1`), set `tag_prefix: ''` in the Rakefile so Bundler's `already_tagged?`
+finds the existing tag and skips the git push:
+
+```ruby
+# Rakefile
+Bundler::GemHelper.install_tasks(tag_prefix: '')
+```
+
 ```yaml
 # .github/workflows/ci.yml — you write and own this
 jobs:
@@ -153,7 +162,7 @@ jobs:
   gems-lockfile-hygiene:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<sha>          # v4
+      - uses: actions/checkout@<sha>
       - uses: twilio/sdk-actions/gems-lockfile-hygiene@<sha>
 
   test:
@@ -164,13 +173,13 @@ jobs:
     strategy:
       matrix: { ruby: ['3.1', '3.2', '3.3'] }
     steps:
-      - uses: actions/checkout@<sha>          # v4
+      - uses: actions/checkout@<sha>
       # Forks have no Artifactory secret; skip login and resolve from public rubygems.
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: twilio/sdk-actions/artifactory-oidc@<sha>
         with:
           ecosystem: ruby
-      - uses: ruby/setup-ruby@<sha>           # v1
+      - uses: ruby/setup-ruby@<sha>
         with:
           ruby-version: '${{ matrix.ruby }}'
           bundler: '2'
@@ -179,15 +188,17 @@ jobs:
 
   # Publish on tag push. rubygems/release-gem handles OIDC exchange + gem build + push.
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-x64
     environment: production                   # must match rubygems.org trusted publisher
     permissions:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@<sha>          # v4
-      - uses: ruby/setup-ruby@<sha>           # v1
+      - uses: actions/checkout@<sha>
+        with:
+          fetch-depth: 0
+      - uses: ruby/setup-ruby@<sha>
         with:
           ruby-version: '3.3'
           bundler-cache: true
