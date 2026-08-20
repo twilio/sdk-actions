@@ -4,13 +4,14 @@ description: >-
   token and point your package manager at the curated registry. For `npm` this
   writes ~/.npmrc; for `python` it exports UV_INDEX_URL / PIP_INDEX_URL; for
   `ruby` it configures Bundler to mirror rubygems.org through Artifactory; for
-  `php` it writes Composer's GLOBAL config; for `dotnet` it registers an
-  Artifactory NuGet source. No long-lived secrets. Requires `id-token: write`
-  on the calling job.
+  `php` it writes Composer's GLOBAL config; for `go` it exports GOPROXY and
+  writes ~/.netrc; for `maven` it writes ~/.m2/settings.xml; for `dotnet` it
+  registers an Artifactory NuGet source. No long-lived secrets. Requires
+  `id-token: write` on the calling job.
 
 inputs:
   ecosystem:
-    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc), 'python' (exports UV_INDEX_URL / PIP_INDEX_URL), 'ruby' (configures Bundler mirror), 'php' (writes Composer global config), or 'dotnet' (adds a NuGet source)."
+    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc), 'python' (exports UV_INDEX_URL / PIP_INDEX_URL), 'ruby' (configures Bundler mirror), 'php' (writes Composer global config), 'go' (exports GOPROXY + writes ~/.netrc), 'maven' (writes ~/.m2/settings.xml), or 'dotnet' (adds a NuGet source)."
     required: false
     default: "npm"
   artifactory-url:
@@ -18,7 +19,7 @@ inputs:
     required: false
     default: "https://twilio.jfrog.io"
   registry-path:
-    description: "Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty / virtual-gems-thirdparty / virtual-php-thirdparty / virtual-nuget-thirdparty)."
+    description: "Artifactory virtual repo path used for the registry + auth line. Defaults per ecosystem (virtual-npm-thirdparty / virtual-pypi-thirdparty / virtual-gems-thirdparty / virtual-php-thirdparty / virtual-go-thirdparty / virtual-maven-thirdparty / virtual-nuget-thirdparty)."
     required: false
     default: ""
   provider-name:
@@ -54,9 +55,10 @@ runs:
             python) REGISTRY_PATH='virtual-pypi-thirdparty' ;;
             ruby)   REGISTRY_PATH='virtual-gems-thirdparty' ;;
             php)    REGISTRY_PATH='virtual-php-thirdparty' ;;
+            go)     REGISTRY_PATH='virtual-go-thirdparty' ;;
             dotnet) REGISTRY_PATH='virtual-nuget-thirdparty' ;;
             maven)   REGISTRY_PATH='virtual-maven-thirdparty' ;;
-            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', 'maven', or 'dotnet')"; exit 1 ;;
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', 'go', 'maven', or 'dotnet')"; exit 1 ;;
           esac
         fi
 
@@ -158,6 +160,41 @@ runs:
             composer config --global --auth "bearer.${HOST}" "${ART_TOKEN}"
 
             echo "::notice::composer configured to resolve through Artifactory (${REGISTRY_PATH})"
+            ;;
+          go)
+            GOPROXY_URL="${ARTIFACTORY_URL}/artifactory/api/go/${REGISTRY_PATH}"
+
+            # The token goes in ~/.netrc, NOT in GOPROXY. `go env` prints GOPROXY
+            # verbatim, so a token embedded in the URL leaks into every build log
+            # that dumps the Go environment (and into `go env -json` in a debug
+            # step). GOAUTH defaults to "netrc", and the go command has read
+            # ~/.netrc for module fetches since modules existed, so this works on
+            # every supported Go version.
+            umask 077
+            touch ~/.netrc
+            chmod 600 ~/.netrc
+            printf 'machine %s login %s password %s\n' "$HOST" "$ART_USERNAME" "$ART_TOKEN" >> ~/.netrc
+
+            # No `,direct` fallback — curation must be FAIL-CLOSED. With `direct`,
+            # any module Artifactory REFUSES (curation block, CVE, version-age
+            # cooldown) would be silently fetched straight from its VCS host
+            # instead, and the control would fail open with no error.
+            echo "GOPROXY=${GOPROXY_URL}" >> "$GITHUB_ENV"
+
+            # Leave GOSUMDB alone. The committed go.sum is what actually verifies
+            # every module already required, and the checksum database is only
+            # consulted for modules NOT yet in go.sum. If the Artifactory proxy
+            # doesn't serve the /sumdb/ endpoint the go command falls back to
+            # sum.golang.org directly, so a normal build needs no extra config.
+            # Clear the inherited private-module vars so nothing bypasses the
+            # proxy or the checksum database on a self-hosted runner.
+            {
+              echo "GONOSUMDB="
+              echo "GONOPROXY="
+              echo "GOPRIVATE="
+            } >> "$GITHUB_ENV"
+
+            echo "::notice::go configured to resolve modules through Artifactory (${REGISTRY_PATH})"
             ;;
           dotnet)
             dotnet nuget add source "${ARTIFACTORY_URL}/artifactory/api/nuget/v3/${REGISTRY_PATH}/index.json" --name Artifactory --username "${ART_USERNAME}" --password "${ART_TOKEN}" --store-password-in-clear-text

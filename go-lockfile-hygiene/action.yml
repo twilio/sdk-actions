@@ -1,0 +1,245 @@
+name: "Go lockfile hygiene"
+description: >-
+  Supply-chain gate for public Go modules. (1) Scan tracked go.mod / go.sum /
+  go.work for internal module hosts, `replace` directives, and a module path
+  that doesn't match the public repo; (2) optionally prove the committed
+  go.mod + go.sum resolve and build from the PUBLIC module proxy only.
+  Secret-less — safe on forks. Drop into its OWN job for a true clean room.
+
+inputs:
+  scan:
+    description: "Run the internal-host / replace / module-path scan."
+    required: false
+    default: "true"
+  clean-room:
+    description: "Run the public-only resolve to prove external consumability."
+    required: false
+    default: "true"
+  deny-hosts:
+    description: 'Extra internal module-path prefixes to reject, pipe-separated regex (e.g. git\.example\.internal).'
+    required: false
+    default: ""
+  allow-replace:
+    description: "Permit `replace` directives in a tracked go.mod. Consumers IGNORE them, so a replace makes CI green while leaving the published module broken."
+    required: false
+    default: "false"
+  module-path-check:
+    description: "Require every module path to sit under github.com/$GITHUB_REPOSITORY, and the /vN suffix to match the tag's major version."
+    required: false
+    default: "true"
+  build:
+    description: "Run `go build ./...` in the clean room. Proves go.sum is complete, not just that go.mod resolves."
+    required: false
+    default: "true"
+  tidy-check:
+    description: "Run `go mod tidy -diff` (Go >= 1.23) to fail if go.mod/go.sum are out of date. Off by default — it is sensitive to the toolchain version."
+    required: false
+    default: "false"
+  go-version:
+    description: "Go version for the scan and the clean-room resolve."
+    required: false
+    default: "stable"
+  proxy:
+    description: "GOPROXY for the clean room. The default is what an external consumer gets out of the box."
+    required: false
+    default: "https://proxy.golang.org,direct"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      if: ${{ inputs.scan == 'true' || inputs.clean-room == 'true' }}
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: false
+
+    - name: Scan go.mod / go.sum / go.work for internal module hosts
+      if: ${{ inputs.scan == 'true' }}
+      shell: bash
+      env:
+        EXTRA_DENY: ${{ inputs.deny-hosts }}
+      run: |
+        set -euo pipefail
+
+        # Go is the one ecosystem where the module path IS the fetch location, so
+        # there is no separate "resolved host" field to allow-list — the long tail
+        # of legitimate public vanity domains (golang.org/x, k8s.io, go.uber.org,
+        # rsc.io, gopkg.in, …) makes an allow-list pure noise. Deny the internal
+        # hosts explicitly instead, and let the clean-room resolve below be the
+        # real fail-closed proof that everything left is publicly fetchable.
+        DENY='code\.hq\.twilio\.com|[a-z0-9.-]+\.twilio\.com|twilio\.jfrog\.io|github\.com/twilio-internal/|github\.com/sendgrid-ops/|github\.com/segmentio-internal/'
+        if [ -n "$EXTRA_DENY" ]; then DENY="${DENY}|${EXTRA_DENY}"; fi
+
+        BAD=""
+        FOUND=0
+
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          FOUND=1
+          # `go mod edit -json` beats a regex here: it understands single-line and
+          # block require/replace/exclude forms, comments, and quoting. A parse
+          # failure is a hard error — this gate must never report a pass because
+          # it could not read the file.
+          if ! MODJSON=$(go mod edit -json "$f"); then
+            echo "::error file=${f}::could not parse ${f} — refusing to report a pass without scanning"
+            exit 1
+          fi
+          PATHS=$(printf '%s' "$MODJSON" | jq -r '
+            [ (.Module.Path // empty)
+            , ((.Require // [])[].Path)
+            , ((.Replace // [])[] | .Old.Path, .New.Path)
+            , ((.Exclude // [])[].Path)
+            ] | .[] | select(. != null and . != "")' | sort -u)
+          for p in $PATHS; do
+            if echo "$p" | grep -qE "^($DENY)"; then
+              BAD="${BAD}${f}: ${p}"$'\n'
+            fi
+          done
+        done < <(git ls-files 'go.mod' '**/go.mod' 2>/dev/null)
+
+        # go.sum records one line per module version: "<path> <version> <hash>".
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          FOUND=1
+          for p in $(awk '{print $1}' "$f" | sort -u); do
+            if echo "$p" | grep -qE "^($DENY)"; then
+              BAD="${BAD}${f}: ${p}"$'\n'
+            fi
+          done
+        done < <(git ls-files 'go.sum' '**/go.sum' 2>/dev/null)
+
+        if [ "$FOUND" -eq 0 ]; then
+          echo "::notice::no go.mod / go.sum tracked; nothing to scan"
+        elif [ -n "$BAD" ]; then
+          echo "::error::Internal module paths found; external consumers cannot resolve them. A public module may only depend on publicly fetchable modules:"
+          printf '%s' "$BAD"
+          exit 1
+        else
+          echo "::notice::module-path scan OK — no internal hosts in go.mod / go.sum"
+        fi
+
+        # A tracked go.work silently overrides module resolution for anyone who
+        # clones the repo, and is ignored entirely by consumers of the module —
+        # so it can make CI green over a tree that no consumer can reproduce.
+        if [ -n "$(git ls-files 'go.work' 2>/dev/null)" ]; then
+          echo "::warning file=go.work::go.work is tracked. It overrides resolution for contributors and is ignored by consumers — prefer keeping it untracked."
+        fi
+
+    - name: Reject `replace` directives
+      if: ${{ inputs.scan == 'true' && inputs.allow-replace != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        FAIL=0
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          # The go command applies `replace` only from the MAIN module's go.mod.
+          # In a published library it is dead weight to consumers — so CI resolves
+          # one graph and every consumer resolves a different one. This is the Go
+          # analogue of a committed Composer `repositories` block.
+          REPL=$(go mod edit -json "$f" | jq -r '(.Replace // [])[] | "  \(.Old.Path) => \(.New.Path // .New.Version)"')
+          if [ -n "$REPL" ]; then
+            echo "::error file=${f}::${f} contains replace directives. Consumers IGNORE them, so this module resolves differently for everyone else:"
+            printf '%s\n' "$REPL"
+            FAIL=1
+          fi
+        done < <(git ls-files 'go.mod' '**/go.mod' 2>/dev/null)
+        [ "$FAIL" -eq 0 ] || exit 1
+        echo "::notice::no replace directives"
+
+    - name: Check module path matches the repo (and the tag's major version)
+      if: ${{ inputs.scan == 'true' && inputs.module-path-check == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        FAIL=0
+        EXPECT="github.com/${GITHUB_REPOSITORY}"
+
+        while IFS= read -r f; do
+          [ -f "$f" ] || continue
+          MOD=$(go mod edit -json "$f" | jq -r '.Module.Path // empty')
+          [ -n "$MOD" ] || { echo "::error file=${f}::${f} has no module path"; FAIL=1; continue; }
+
+          # `go get github.com/owner/repo/...` fetches by the module path, so a
+          # path that doesn't match the repo is simply unfetchable — the module
+          # publishes to a name nothing serves.
+          case "$MOD" in
+            "$EXPECT"|"$EXPECT"/*) ;;
+            *)
+              echo "::error file=${f}::module path '${MOD}' does not sit under '${EXPECT}'. Go fetches by module path, so consumers cannot resolve this."
+              FAIL=1
+              ;;
+          esac
+
+          # Semantic import versioning: v2+ must carry a /vN suffix, and N must be
+          # the tag's major. Getting this wrong publishes a tag the proxy will
+          # refuse to serve ("invalid version: module contains a go.mod file, so
+          # major version must be compatible").
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            MAJOR=$(printf '%s' "$TAG" | sed -nE 's#^v?([0-9]+)\..*#\1#p')
+            if [ -n "$MAJOR" ]; then
+              SUFFIX=$(printf '%s' "$MOD" | sed -nE 's#.*/v([0-9]+)$#\1#p')
+              if [ "$MAJOR" -ge 2 ] && [ "$SUFFIX" != "$MAJOR" ]; then
+                echo "::error file=${f}::tag ${TAG} is major v${MAJOR}, so the module path must end in /v${MAJOR} (got '${MOD}')"
+                FAIL=1
+              elif [ "$MAJOR" -lt 2 ] && [ -n "$SUFFIX" ]; then
+                echo "::error file=${f}::module path '${MOD}' declares /v${SUFFIX} but tag ${TAG} is major v${MAJOR}"
+                FAIL=1
+              fi
+            fi
+          fi
+        done < <(git ls-files 'go.mod' '**/go.mod' 2>/dev/null)
+        [ "$FAIL" -eq 0 ] || exit 1
+        echo "::notice::module path checks OK"
+
+    - name: Clean-room public resolve
+      if: ${{ inputs.clean-room == 'true' }}
+      shell: bash
+      env:
+        IN_PROXY: ${{ inputs.proxy }}
+        DO_BUILD: ${{ inputs.build }}
+        DO_TIDY: ${{ inputs.tidy-check }}
+      run: |
+        set -euo pipefail
+
+        # Hermetic module cache + GOPATH so a warm cache cannot satisfy a module
+        # the public proxy would refuse to serve.
+        export GOPATH="${RUNNER_TEMP}/go-clean-room"
+        export GOMODCACHE="${GOPATH}/pkg/mod"
+        export GOCACHE="${GOPATH}/build-cache"
+        mkdir -p "$GOMODCACHE" "$GOCACHE"
+
+        # Exactly what an external consumer gets out of the box.
+        export GOPROXY="$IN_PROXY"
+        export GOSUMDB="sum.golang.org"
+        export GOFLAGS="-mod=readonly"
+
+        # Ambient Twilio config is the thing most likely to mask a real failure:
+        # a self-hosted runner with GOPRIVATE=github.com/twilio/* makes the go
+        # command skip BOTH the proxy and the checksum database for exactly the
+        # modules this gate exists to check. Clear them, and the netrc that an
+        # earlier artifactory-oidc step may have written.
+        export GOPRIVATE="" GONOPROXY="" GONOSUMDB="" GOINSECURE="" GOAUTH="off"
+        export NETRC="${GOPATH}/empty-netrc"
+        : > "$NETRC"
+
+        # `all` is the full build list, not just direct requires — a transitive
+        # dependency that was never published publicly breaks consumers too.
+        go mod download all
+
+        # Every downloaded module hashes to what go.sum says it should.
+        go mod verify
+
+        if [ "$DO_TIDY" = "true" ]; then
+          go mod tidy -diff
+        fi
+
+        if [ "$DO_BUILD" = "true" ]; then
+          # -mod=readonly means a missing go.sum entry is a hard failure here,
+          # which is what a consumer would hit.
+          go build ./...
+        fi
+
+        echo "::notice::clean-room public resolve succeeded"
