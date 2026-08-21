@@ -1,0 +1,78 @@
+/*
+    Gradle projects tend to use a variety of repositories for dependencies and plugins.
+    To not force all projects to use one repository to rule them all, we break
+    them out per remote repository.
+ */
+def MIRRORS = [
+    [name: 'MavenRepo',                        public_url: 'https://repo.maven.apache.org/maven2/',    artifactory_repo: 'virtual-maven-thirdparty'],
+    [name: 'Google',                           public_url: 'https://dl.google.com/dl/android/maven2/', artifactory_repo: 'remote-maven-google'],
+    [name: 'Gradle Central Plugin Repository', public_url: 'https://plugins.gradle.org/m2/',           artifactory_repo: 'remote-maven-gradle-plugins'],
+]
+
+def propsFile = new File(gradle.gradleUserHomeDir, 'artifactoryoidc.properties')
+def props = new Properties()
+if (propsFile.exists()) {
+    propsFile.withInputStream { props.load(it) }
+}
+
+def artifactoryUrl = props.getProperty('url')?.trim()?.replaceAll('/+$', '')
+def artifactoryUsername = props.getProperty('username')
+def artifactoryToken = props.getProperty('token')
+
+if (!artifactoryUrl || !artifactoryUsername || !artifactoryToken) {
+    throw new GradleException("artifactory-mirror: url, username, and token must be set in \${propsFile}")
+}
+
+logger.lifecycle("artifactory-mirror: redirecting repositories to ${artifactoryUrl}")
+
+// Gradle repo URL is a URI object; stringify it so it's safe to use in log messages and string comparisons.
+def repoUrl = { repo -> repo.hasProperty('url') ? repo.url.toString() : '(no url)' }
+
+// Replace each known public repo with its Artifactory mirror, and fails if an unknown repo is encountered
+def substituteRepos = { repos, label ->
+    logger.info("artifactory-mirror: ${label} before substitution:\n${repos.collect { "  ${it.name} -> ${repoUrl(it)}" }.join('\n')}")
+
+    def toRemove = []
+    def toInject = []
+
+    repos.each { repo ->
+        if (!repo.hasProperty('url')) return
+        // TODO: URL suffix after the matched base is currently discarded. If a repo URL has a
+        // meaningful suffix (e.g. https://example.com/repo/releases), the mirror URL will not
+        // include it. Handle by capturing and appending the suffix if this becomes an issue.
+        def match = MIRRORS.find { mirror ->
+            (mirror.name && repo.name == mirror.name) || repo.url?.toString()?.startsWith(mirror.public_url)
+        }
+        if (match) {
+            toRemove << repo
+            toInject << [artifactory_repo: match.artifactory_repo, originalName: repo.name, originalUrl: repoUrl(repo)]
+        } else {
+            throw new GradleException("artifactory-mirror: Unknown ${label} repository not mapped to a mirror: name=${repo.name} url=${repoUrl(repo)}")
+        }
+    }
+
+    toRemove.each { repos.remove(it) }
+    toInject.each { mirror ->
+        def mirrorUrl = "${artifactoryUrl}/artifactory/${mirror.artifactory_repo}/"
+        logger.lifecycle("artifactory-mirror: replacing ${mirror.originalName}[${mirror.originalUrl}] with Artifactory-Mirror-${mirror.originalName}[${mirrorUrl}]")
+        repos.maven {
+            name = "Artifactory-Mirror-${mirror.originalName}"
+            url mirrorUrl
+            credentials { username = artifactoryUsername; password = artifactoryToken }
+        }
+    }
+}
+
+// Repositories for Gradle Plugin dependency resolution
+settingsEvaluated { settings ->
+    logger.lifecycle("artifactory-mirror: updating plugin repositories")
+    substituteRepos(settings.pluginManagement.repositories, 'plugin repos')
+}
+
+// Repositories for actual code dependency resolution
+allprojects {
+    afterEvaluate {
+        logger.lifecycle("artifactory-mirror: updating dependency repositories for project '${project.name}'")
+        substituteRepos(project.repositories, "${project.name} dependency repos")
+    }
+}
