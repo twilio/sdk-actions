@@ -4,17 +4,19 @@ Small, composable GitHub Actions for building and publishing Twilio's public
 SDKs: **Artifactory OIDC login**, **lockfile hygiene**, and **publishing**.
 Drop them into your own `ci.yml` / `publish.yml` as steps — there is no
 black-box pipeline to adopt. `artifactory-oidc` and lockfile hygiene cover npm,
-Python (uv), PHP (Composer), and Ruby (Bundler); `npm-publish` is npm-specific.
+Python (uv), PHP (Composer), Ruby (Bundler), and Go; `npm-publish` is
+npm-specific.
 
 ## The actions
 
 | Action | What it does |
 |--------|--------------|
-| [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points your package manager at the curated registry — npm via `~/.npmrc`, Python (`ecosystem: python`) via `UV_INDEX_URL` / `PIP_INDEX_URL`, PHP (`ecosystem: php`) via Composer global config, or Ruby (`ecosystem: ruby`) via Bundler mirror + per-host credentials. No stored secret. |
+| [`artifactory-oidc`](artifactory-oidc/action.yml) | Exchanges the GitHub OIDC token for a short-lived Artifactory token and points your package manager at the curated registry — npm via `~/.npmrc`, Python (`ecosystem: python`) via `UV_INDEX_URL` / `PIP_INDEX_URL`, PHP (`ecosystem: php`) via Composer global config, Ruby (`ecosystem: ruby`) via Bundler mirror + per-host credentials, or Go (`ecosystem: go`) via `GOPROXY` + `~/.netrc`. No stored secret. |
 | [`npm-lockfile-hygiene`](npm-lockfile-hygiene/action.yml) | Fails closed if a lockfile/config names a non-public registry host, and (optionally) does a clean-room public install to prove external installability. Secret-less — safe on forks. |
 | [`uv-lockfile-hygiene`](uv-lockfile-hygiene/action.yml) | Same gate for Python (uv): scans `uv.lock` / `requirements*.txt` and clean-room installs with `uv sync --frozen` from public PyPI. Secret-less — safe on forks. Pass `no-build: true` for a wheels-only install so no dependency build backend executes. |
 | [`composer-lockfile-hygiene`](composer-lockfile-hygiene/action.yml) | Same gate for PHP: scans `composer.lock` dist/source hosts, rejects a committed `repositories` block or hardcoded `version` in `composer.json`, and clean-room installs from public Packagist. Secret-less — safe on forks. |
 | [`gems-lockfile-hygiene`](gems-lockfile-hygiene/action.yml) | Same gate for Ruby: scans `Gemfile.lock` for non-public hosts and clean-room installs with `bundle install --frozen` from public rubygems.org. Secret-less — safe on forks. |
+| [`go-lockfile-hygiene`](go-lockfile-hygiene/action.yml) | Same gate for Go: scans `go.mod` / `go.sum` for internal module paths, rejects `replace` directives, checks the module path against the repo (and `/vN` against the tag), then clean-room resolves and builds from the public module proxy. Secret-less — safe on forks. |
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 | [`github-release`](github-release/action.yml) | Creates (or updates) a GitHub Release for a tag, with notes lifted from the changelog. Pure `gh` + `awk`. |
 | [`semantic-pr-title`](semantic-pr-title/action.yml) | Checks a PR title against Conventional Commits. Pure bash. |
@@ -146,6 +148,15 @@ credentials so `bundle install` resolves through Artifactory), use
 `gems-lockfile-hygiene` for the supply-chain gate, and publish via RubyGems OIDC
 trusted publishing with `rubygems/release-gem` — no API key needed.
 
+If your repo uses tags without a `v` prefix (e.g., `7.11.1` instead of
+`v7.11.1`), set `tag_prefix: ''` in the Rakefile so Bundler's `already_tagged?`
+finds the existing tag and skips the git push:
+
+```ruby
+# Rakefile
+Bundler::GemHelper.install_tasks(tag_prefix: '')
+```
+
 ```yaml
 # .github/workflows/ci.yml — you write and own this
 jobs:
@@ -153,7 +164,7 @@ jobs:
   gems-lockfile-hygiene:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<sha>          # v4
+      - uses: actions/checkout@<sha>
       - uses: twilio/sdk-actions/gems-lockfile-hygiene@<sha>
 
   test:
@@ -164,13 +175,13 @@ jobs:
     strategy:
       matrix: { ruby: ['3.1', '3.2', '3.3'] }
     steps:
-      - uses: actions/checkout@<sha>          # v4
+      - uses: actions/checkout@<sha>
       # Forks have no Artifactory secret; skip login and resolve from public rubygems.
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: twilio/sdk-actions/artifactory-oidc@<sha>
         with:
           ecosystem: ruby
-      - uses: ruby/setup-ruby@<sha>           # v1
+      - uses: ruby/setup-ruby@<sha>
         with:
           ruby-version: '${{ matrix.ruby }}'
           bundler: '2'
@@ -179,15 +190,17 @@ jobs:
 
   # Publish on tag push. rubygems/release-gem handles OIDC exchange + gem build + push.
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-x64
     environment: production                   # must match rubygems.org trusted publisher
     permissions:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@<sha>          # v4
-      - uses: ruby/setup-ruby@<sha>           # v1
+      - uses: actions/checkout@<sha>
+        with:
+          fetch-depth: 0
+      - uses: ruby/setup-ruby@<sha>
         with:
           ruby-version: '3.3'
           bundler-cache: true
@@ -214,6 +227,155 @@ Consequences worth knowing before you plan work here:
   guarantee to be stable.
 - **A private source repo cannot publish to packagist.org at all** — unlike npm,
   where trusted publishing works and you only lose provenance.
+
+## Compose them: CI & Publish (Go)
+
+Pass `ecosystem: go` to `artifactory-oidc` (it exports `GOPROXY` and writes
+`~/.netrc`), and use `go-lockfile-hygiene` for the supply-chain gate. There is no
+`go-publish` action and there never will be — read the next section before
+copying any YAML, because Go moves the irreversible moment earlier than every
+other ecosystem here.
+
+### Publishing Go: the tag *is* the publish
+
+A Go module is published by **pushing a semver tag to a public repo**. There is
+no upload, no registry account, and no credential — `proxy.golang.org` fetches
+the tag the first time anyone asks for it.
+
+Three consequences drive the design:
+
+1. **An `environment:` gate on a tag-push workflow gates nothing.** By the time
+   the job starts, the tag is already public and already fetchable. This is the
+   one place where the PHP recipe does *not* transfer: Packagist waits for a
+   GitHub Release, Go does not wait for anything.
+2. **Publication is permanent.** `sum.golang.org` is an append-only transparency
+   log; once a version's `h1:` hash is recorded, moving the tag gives every
+   consumer a `checksum mismatch` **security error**, not a fresh download. You
+   cannot fix a bad release by re-tagging — ship a new patch and add a
+   [`retract`](https://go.dev/ref/mod#go-mod-file-retract) directive.
+3. **Whoever can push a tag can publish.** Tag permissions are the real access
+   control, so the gate has to sit *in front of tag creation*:
+   - a **tag ruleset** on `refs/tags/v*` restricting who may create tags, and
+   - a **`workflow_dispatch` release workflow** whose tagging job carries
+     `environment: production`, so the tag only ever comes into existence after
+     an approval.
+
+That last point is why the release workflow below is dispatch-triggered rather
+than `on: push: tags:` like the npm and PHP ones.
+
+```yaml
+# .github/workflows/ci.yml — you write and own this
+name: CI
+on: { push: { branches: [main] }, pull_request: {}, workflow_dispatch: {} }
+
+jobs:
+  # Secret-less gate — its own job so the clean-room resolve is truly isolated.
+  go-lockfile-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>          # v5
+      - uses: twilio/sdk-actions/go-lockfile-hygiene@<sha>
+
+  test:
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    permissions:
+      contents: read
+      id-token: write                         # needed for the OIDC login below
+    strategy:
+      matrix: { go: ['1.23', '1.24', '1.25'] }
+    steps:
+      - uses: actions/checkout@<sha>          # v5
+      - uses: actions/setup-go@<sha>          # v7
+        with: { go-version: '${{ matrix.go }}' }
+      # Forks have no Artifactory secret; skip login and resolve from proxy.golang.org.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@<sha>
+        with:
+          ecosystem: go
+      # Go has no --ignore-scripts to worry about: `go build` compiles source but
+      # runs no dependency-authored install hooks. `go generate` and cgo do run
+      # code — keep those out of a job holding id-token: write.
+      - run: go build ./...
+      - run: go test ./...
+```
+
+```yaml
+# .github/workflows/release.yml — you write and own this
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. v1.31.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that can fail cheaply fails BEFORE the gate — reviewers should
+  # only ever be asked to approve a green candidate.
+  verify:
+    runs-on: ubuntu-x64
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@<sha>          # v5
+        with: { ref: main, fetch-depth: 0 }
+      - uses: twilio/sdk-actions/go-lockfile-hygiene@<sha>
+      - uses: actions/setup-go@<sha>          # v7
+        with: { go-version: '1.25' }
+      - uses: twilio/sdk-actions/artifactory-oidc@<sha>
+        with:
+          ecosystem: go
+      - run: go build ./...
+      - run: go test ./...
+
+  publish:
+    needs: [verify]
+    runs-on: ubuntu-x64
+    environment: production   # THE GATE — the tag does not exist until this is approved
+    permissions:
+      contents: write         # create the tag and the Release
+    steps:
+      - uses: actions/checkout@<sha>          # v5
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-go@<sha>          # v7
+        with: { go-version: '1.25' }
+
+      # THE POINT OF NO RETURN. The moment this ref lands, the version is public
+      # and permanent — proxy.golang.org will serve it and sum.golang.org will
+      # pin its hash forever.
+      - name: Create the release tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
+
+      - uses: twilio/sdk-actions/github-release@<sha>
+        with:
+          tag: ${{ inputs.version }}
+          changelog-file: CHANGES.md
+
+      # Prove the version is really servable, and capture the checksum that
+      # sum.golang.org has now committed to.
+      - name: Warm the public proxy and record the checksum
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          MOD="$(go list -m)"
+          cd "$(mktemp -d)"
+          go mod init warm
+          # Public defaults only — this must mirror what a consumer gets.
+          GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+          GOPRIVATE= GONOPROXY= GONOSUMDB= GOFLAGS=-mod=mod \
+            go get "${MOD}@${VERSION}"
+          grep -E "^${MOD} ${VERSION} h1:" go.sum
+```
 
 ## Compose them: Publish (single package)
 
@@ -295,6 +457,25 @@ via the env var Lerna passes through to npm:
   (JFrog rejects `token` as an http-basic username), and **disables
   `packagist.org`** so curation is fail-closed. Note the key is `repo.packagist.org`;
   the legacy `repo.packagist` alias silently leaves the real default enabled.
+- **Go** (`ecosystem: go`): the token goes in `~/.netrc`, **not** in `GOPROXY` —
+  `go env` prints `GOPROXY` verbatim, so a token embedded there leaks into any
+  log that dumps the Go environment. `GOPROXY` is set to the Artifactory proxy
+  **with no `,direct` fallback**, so curation is fail-closed; with `direct`, any
+  module Artifactory refuses would be fetched straight from its VCS host instead.
+  `GOSUMDB` is deliberately left alone: the committed `go.sum` verifies every
+  module already required, and the checksum database is only consulted for
+  modules not yet in it.
+- **Go and `GOPRIVATE`**: a self-hosted runner with
+  `GOPRIVATE=github.com/twilio/*` makes the go command skip **both** the proxy
+  and the checksum database for exactly the modules you care about — silently.
+  `artifactory-oidc` clears `GOPRIVATE` / `GONOPROXY` / `GONOSUMDB`, and
+  `go-lockfile-hygiene` clears them again in its clean room, because ambient
+  config is the likeliest thing to mask a real failure.
+- **Go module paths**: `go get` fetches by module path, so the `module` line must
+  match the public repo, and **v2+ needs a `/vN` suffix** matching the tag's
+  major version. `go-lockfile-hygiene` checks both. It also rejects `replace`
+  directives — the go command honours them only in the *main* module, so a
+  library with one resolves a different graph in CI than at every consumer.
 - **Python** (`ecosystem: python`): `artifactory-oidc` exports `UV_INDEX_URL` /
   `PIP_INDEX_URL` into `$GITHUB_ENV` (token as the basic-auth password, empty
   username — JFrog rejects `token` as the username). It does not touch
