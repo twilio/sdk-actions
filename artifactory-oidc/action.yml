@@ -11,7 +11,7 @@ description: >-
 
 inputs:
   ecosystem:
-    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc), 'python' (exports UV_INDEX_URL / PIP_INDEX_URL), 'ruby' (configures Bundler mirror), 'php' (writes Composer global config), 'go' (exports GOPROXY + writes ~/.netrc), 'maven' (writes ~/.m2/settings.xml), or 'dotnet' (adds a NuGet source)."
+    description: "Package ecosystem to configure: 'npm' (writes ~/.npmrc), 'python' (exports UV_INDEX_URL / PIP_INDEX_URL), 'ruby' (configures Bundler mirror), 'php' (writes Composer global config), 'go' (exports GOPROXY + writes ~/.netrc), 'maven' (writes ~/.m2/settings.xml), 'dotnet' (adds a NuGet source), or 'gradle' (writes init gradle files)."
     required: false
     default: "npm"
   artifactory-url:
@@ -58,7 +58,8 @@ runs:
             go)     REGISTRY_PATH='virtual-go-thirdparty' ;;
             dotnet) REGISTRY_PATH='virtual-nuget-thirdparty' ;;
             maven)   REGISTRY_PATH='virtual-maven-thirdparty' ;;
-            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', 'go', 'maven', or 'dotnet')"; exit 1 ;;
+            gradle) ;;  # repos are defined in gradle-mirrors.init.gradle, not here
+            *) echo "::error::unknown ecosystem '$ECOSYSTEM' (expected 'npm', 'python', 'ruby', 'php', 'go', 'maven', 'gradle', or 'dotnet')"; exit 1 ;;
           esac
         fi
 
@@ -208,5 +209,11 @@ runs:
             REGISTRY_PATH="$REGISTRY_PATH" \
               envsubst < "$GITHUB_ACTION_PATH/maven-settings.xml.tmpl" > ~/.m2/settings.xml
             echo "::notice::Maven configured to use Artifactory registry (${REGISTRY_PATH})"
+            ;;
+          gradle)
+            mkdir -p ~/.gradle/init.d/
+            cp "$GITHUB_ACTION_PATH/gradle-mirrors.init.gradle" ~/.gradle/init.d/mirrors.init.gradle
+            printf 'url=%s\nusername=%s\ntoken=%s\n' "$ARTIFACTORY_URL" "$ART_USERNAME" "$ART_TOKEN" > ~/.gradle/artifactoryoidc.properties
+            echo "::notice::Gradle init file added to overwrite repositories on Gradle runs (${ARTIFACTORY_URL})"
             ;;
         esac
