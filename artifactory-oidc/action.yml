@@ -202,11 +202,31 @@ runs:
             ;;
           maven)
             mkdir -p ~/.m2/
+
+            # actions/setup-java (run before this action) may have already written
+            # ~/.m2/settings.xml with its own <servers> (e.g. GitHub Packages
+            # credentials), <profiles> (custom repositories, GPG passphrase), and
+            # <activeProfiles>. We overwrite this file, so extract those blocks
+            # first and splice them back in — otherwise we'd silently drop
+            # credentials/config the calling workflow depends on.
+            EXISTING_SERVERS=""
+            EXISTING_PROFILES=""
+            EXISTING_ACTIVE_PROFILES=""
+            if [ -f ~/.m2/settings.xml ]; then
+              echo "::notice::Found existing ~/.m2/settings.xml (e.g. from actions/setup-java) — merging its <servers>, <profiles>, and <activeProfiles>"
+              EXISTING_SERVERS=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml servers)
+              EXISTING_PROFILES=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml profiles)
+              EXISTING_ACTIVE_PROFILES=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml activeProfiles)
+            fi
+
             # Pass vars explicitly into envsubst's environment so the child process can see them.
             ART_USERNAME="$ART_USERNAME" \
             ART_TOKEN="$ART_TOKEN" \
             ARTIFACTORY_URL="$ARTIFACTORY_URL" \
             REGISTRY_PATH="$REGISTRY_PATH" \
+            EXISTING_SERVERS="$EXISTING_SERVERS" \
+            EXISTING_PROFILES="$EXISTING_PROFILES" \
+            EXISTING_ACTIVE_PROFILES="$EXISTING_ACTIVE_PROFILES" \
               envsubst < "$GITHUB_ACTION_PATH/maven-settings.xml.tmpl" > ~/.m2/settings.xml
             echo "::notice::Maven configured to use Artifactory registry (${REGISTRY_PATH})"
             ;;

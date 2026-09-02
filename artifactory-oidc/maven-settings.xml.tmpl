@@ -9,6 +9,7 @@
       <username>${ART_USERNAME}</username>
       <password>${ART_TOKEN}</password>
     </server>
+    ${EXISTING_SERVERS}
   </servers>
   <mirrors>
     <mirror>
@@ -17,4 +18,10 @@
       <url>${ARTIFACTORY_URL}/artifactory/${REGISTRY_PATH}</url>
     </mirror>
   </mirrors>
+  <profiles>
+    ${EXISTING_PROFILES}
+  </profiles>
+  <activeProfiles>
+    ${EXISTING_ACTIVE_PROFILES}
+  </activeProfiles>
 </settings>
