@@ -214,9 +214,9 @@ runs:
             EXISTING_ACTIVE_PROFILES=""
             if [ -f ~/.m2/settings.xml ]; then
               echo "::notice::Found existing ~/.m2/settings.xml (e.g. from actions/setup-java) — merging its <servers>, <profiles>, and <activeProfiles>"
-              EXISTING_SERVERS=$(xmllint --xpath "//*[local-name()='servers']/*" ~/.m2/settings.xml 2>/dev/null || true)
-              EXISTING_PROFILES=$(xmllint --xpath "//*[local-name()='profiles']/*" ~/.m2/settings.xml 2>/dev/null || true)
-              EXISTING_ACTIVE_PROFILES=$(xmllint --xpath "//*[local-name()='activeProfiles']/*" ~/.m2/settings.xml 2>/dev/null || true)
+              EXISTING_SERVERS=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml servers)
+              EXISTING_PROFILES=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml profiles)
+              EXISTING_ACTIVE_PROFILES=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml activeProfiles)
             fi
 
             # Pass vars explicitly into envsubst's environment so the child process can see them.
