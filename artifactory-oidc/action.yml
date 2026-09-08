@@ -212,11 +212,25 @@ runs:
             EXISTING_SERVERS=""
             EXISTING_PROFILES=""
             EXISTING_ACTIVE_PROFILES=""
+            # xmllint exits with code 11 when an --xpath query result has no matches
+            # this is expected when the tag is empty or doesn't exist.
+            # other exit codes should still fail (bad xml, docker itself fails, etc.)
+            xpath_children() {
+              local result exit_code
+              result=$(docker run --rm -i alpine/xml xmllint --xpath "//*[local-name()='$2']/*" - < "$1")
+              exit_code=$?
+              if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 11 ]; then
+                echo "::error::xmllint failed extracting <$2> from $1 (exit $exit_code)"
+                return "$exit_code"
+              fi
+              printf '%s' "$result"
+            }
+
             if [ -f ~/.m2/settings.xml ]; then
               echo "::notice::Found existing ~/.m2/settings.xml (e.g. from actions/setup-java) — merging its <servers>, <profiles>, and <activeProfiles>"
-              EXISTING_SERVERS=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml servers)
-              EXISTING_PROFILES=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml profiles)
-              EXISTING_ACTIVE_PROFILES=$(python3 "$GITHUB_ACTION_PATH/extract-xml-children.py" ~/.m2/settings.xml activeProfiles)
+              EXISTING_SERVERS=$(xpath_children ~/.m2/settings.xml servers)
+              EXISTING_PROFILES=$(xpath_children ~/.m2/settings.xml profiles)
+              EXISTING_ACTIVE_PROFILES=$(xpath_children ~/.m2/settings.xml activeProfiles)
             fi
 
             # Pass vars explicitly into envsubst's environment so the child process can see them.
