@@ -202,11 +202,45 @@ runs:
             ;;
           maven)
             mkdir -p ~/.m2/
+
+            # actions/setup-java (run before this action) may have already written
+            # ~/.m2/settings.xml with its own <servers> (e.g. GitHub Packages
+            # credentials), <profiles> (custom repositories, GPG passphrase), and
+            # <activeProfiles>. We overwrite this file, so extract those blocks
+            # first and splice them back in — otherwise we'd silently drop
+            # credentials/config the calling workflow depends on.
+            EXISTING_SERVERS=""
+            EXISTING_PROFILES=""
+            EXISTING_ACTIVE_PROFILES=""
+            # xmllint exits with code 11 when an --xpath query result has no matches
+            # this is expected when the tag is empty or doesn't exist.
+            # other exit codes should still fail (bad xml, docker itself fails, etc.)
+            xpath_children() {
+              local result exit_code
+              result=$(docker run --rm -i alpine/xml xmllint --xpath "//*[local-name()='$2']/*" - < "$1")
+              exit_code=$?
+              if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 11 ]; then
+                echo "::error::xmllint failed extracting <$2> from $1 (exit $exit_code)"
+                return "$exit_code"
+              fi
+              printf '%s' "$result"
+            }
+
+            if [ -f ~/.m2/settings.xml ]; then
+              echo "::notice::Found existing ~/.m2/settings.xml (e.g. from actions/setup-java) — merging its <servers>, <profiles>, and <activeProfiles>"
+              EXISTING_SERVERS=$(xpath_children ~/.m2/settings.xml servers)
+              EXISTING_PROFILES=$(xpath_children ~/.m2/settings.xml profiles)
+              EXISTING_ACTIVE_PROFILES=$(xpath_children ~/.m2/settings.xml activeProfiles)
+            fi
+
             # Pass vars explicitly into envsubst's environment so the child process can see them.
             ART_USERNAME="$ART_USERNAME" \
             ART_TOKEN="$ART_TOKEN" \
             ARTIFACTORY_URL="$ARTIFACTORY_URL" \
             REGISTRY_PATH="$REGISTRY_PATH" \
+            EXISTING_SERVERS="$EXISTING_SERVERS" \
+            EXISTING_PROFILES="$EXISTING_PROFILES" \
+            EXISTING_ACTIVE_PROFILES="$EXISTING_ACTIVE_PROFILES" \
               envsubst < "$GITHUB_ACTION_PATH/maven-settings.xml.tmpl" > ~/.m2/settings.xml
             echo "::notice::Maven configured to use Artifactory registry (${REGISTRY_PATH})"
             ;;
