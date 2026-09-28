@@ -1,0 +1,131 @@
+name: "Codecov upload"
+description: >-
+  Upload a coverage report to Codecov using the pinned, checksum-verified
+  Codecov CLI, with no third-party action in the dependency chain. Exists
+  because `codecov/codecov-action` is not on the Actions allowlist for our
+  public SDK repos (`allowed_actions: selected` with `patterns_allowed: []` and
+  `verified_allowed: false`), so referencing it fails the whole run with
+  `startup_failure` before any step executes. Actions inside this enterprise
+  are exempt from that allowlist, so this one can be consumed directly.
+  Secret-bearing — guard it with an `if:` on fork PRs, where the token is
+  unavailable.
+
+inputs:
+  token:
+    description: "Codecov upload token. Passed to the CLI through the CODECOV_TOKEN env var rather than an argv flag, so it cannot leak via the process list."
+    required: true
+  files:
+    description: "Whitespace-separated coverage files to upload explicitly (e.g. 'coverage/lcov.info', 'coverage/clover.xml'). Codecov's own file search is disabled, so these paths are the complete set."
+    required: false
+    default: "coverage/lcov.info"
+  slug:
+    description: "owner/repo slug. Defaults to the current repository."
+    required: false
+    default: ""
+  flags:
+    description: "Optional whitespace-separated Codecov flags, used to group coverage metrics in the Codecov UI (e.g. 'unit integration')."
+    required: false
+    default: ""
+  cli-version:
+    description: "Codecov CLI version to download. Pinned on purpose — the `latest` path is mutable and would silently change what executes in CI."
+    required: false
+    default: "11.3.1"
+  expected-sha256:
+    description: >-
+      Expected SHA-256 of the CLI binary. When set, the download is verified
+      against this pinned value — the strongest option. When empty, the checksum
+      published next to the binary is used instead, which catches corruption and
+      truncation but not substitution: an attacker who could replace the binary
+      could replace its published checksum too. The value is specific to one CLI
+      version AND one runner OS, so only pin it when both are fixed.
+    required: false
+    default: ""
+  fail-on-error:
+    description: >-
+      Fail the step when the upload itself fails. Defaults to true — a silently
+      skipped upload is exactly how a coverage gate rots unnoticed. Set to false
+      if you would rather a Codecov outage not break the build.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify the Codecov CLI
+      shell: bash
+      env:
+        CLI_VERSION: ${{ inputs.cli-version }}
+        EXPECTED_SHA256: ${{ inputs.expected-sha256 }}
+      run: |
+        set -euo pipefail
+
+        case "$RUNNER_OS" in
+          Linux) CLI_OS=linux ;;
+          macOS) CLI_OS=macos ;;
+          *) echo "::error::unsupported runner OS '$RUNNER_OS' (this action supports Linux and macOS)"; exit 1 ;;
+        esac
+
+        BASE="https://cli.codecov.io/v${CLI_VERSION}/${CLI_OS}"
+        WORKDIR="$(mktemp -d)"
+        # Export for the upload step. The binary lives outside the workspace so
+        # it can never be picked up as a coverage file or committed by accident.
+        echo "CODECOV_CLI_DIR=$WORKDIR" >> "$GITHUB_ENV"
+
+        curl -sSfL "$BASE/codecov" -o "$WORKDIR/codecov"
+
+        if [ -n "$EXPECTED_SHA256" ]; then
+          # The checksum file format is "<hash>  <filename>", and the filename
+          # must match what we downloaded for `shasum -c` to check it.
+          echo "$EXPECTED_SHA256  codecov" > "$WORKDIR/codecov.SHA256SUM"
+          echo "::notice::verifying the Codecov CLI against the pinned checksum"
+        else
+          curl -sSfL "$BASE/codecov.SHA256SUM" -o "$WORKDIR/codecov.SHA256SUM"
+          echo "::warning::no expected-sha256 pinned — verifying against the checksum published alongside the binary"
+        fi
+
+        # `shasum` ships on both the Linux and macOS runner images; `sha256sum`
+        # is Linux-only, so it would break a macOS consumer.
+        ( cd "$WORKDIR" && shasum -a 256 -c codecov.SHA256SUM )
+        chmod +x "$WORKDIR/codecov"
+
+    - name: Upload coverage to Codecov
+      shell: bash
+      env:
+        # The CLI picks CODECOV_TOKEN up from the environment automatically.
+        CODECOV_TOKEN: ${{ inputs.token }}
+        FILES: ${{ inputs.files }}
+        FLAGS: ${{ inputs.flags }}
+        INPUT_SLUG: ${{ inputs.slug }}
+        FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${CODECOV_TOKEN:-}" ]; then
+          echo "::error::the token input is empty — pass a Codecov upload token (e.g. secrets.CODECOV_TOKEN). On a fork PR the secret is unavailable, so skip this step with an \`if:\` guard."
+          exit 1
+        fi
+
+        SLUG="${INPUT_SLUG:-$GITHUB_REPOSITORY}"
+
+        # Build the argument list positionally. No arrays or `mapfile` — those
+        # are bash 4+ only and these steps need to stay portable.
+        set -- upload-process --git-service github --slug "$SLUG" --disable-search
+
+        for f in $FILES; do
+          if [ ! -f "$f" ]; then
+            echo "::error::coverage file '$f' not found — did the test step run with coverage enabled?"
+            exit 1
+          fi
+          set -- "$@" --file "$f"
+        done
+
+        for fl in $FLAGS; do
+          set -- "$@" --flag "$fl"
+        done
+
+        if [ "$FAIL_ON_ERROR" = "true" ]; then
+          set -- "$@" --fail-on-error
+        fi
+
+        echo "::notice::uploading coverage to Codecov for $SLUG"
+        "$CODECOV_CLI_DIR/codecov" --verbose "$@"
