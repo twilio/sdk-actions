@@ -20,6 +20,7 @@ npm-specific.
 | [`npm-publish`](npm-publish/action.yml) | Validates the release tag vs `package.json`, then publishes to public npm via OIDC trusted publishing (prereleases → `next`). |
 | [`github-release`](github-release/action.yml) | Creates (or updates) a GitHub Release for a tag, with notes lifted from the changelog. Pure `gh` + `awk`. |
 | [`semantic-pr-title`](semantic-pr-title/action.yml) | Checks a PR title against Conventional Commits. Pure bash. |
+| [`codecov-upload`](codecov-upload/action.yml) | Uploads a coverage report to Codecov using a pinned, checksum-verified Codecov CLI — no third-party action in the chain, so it works on repos where `codecov/codecov-action` is not allow-listed. Secret-bearing: guard it with `if:` on fork PRs. |
 
 Each is a **drop-in step** — you own the runner, matrix, lint, build, and test.
 
@@ -61,7 +62,13 @@ jobs:
       - run: yarn install --frozen-lockfile
       - run: yarn lint
       - run: yarn build
-      - run: yarn test
+      - run: yarn test --coverage
+      # Fork PRs have no CODECOV_TOKEN, so skip rather than fail the build.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/codecov-upload@<sha>  # v1.2.3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/lcov.info
 ```
 
 ## Compose them: CI (Python)
