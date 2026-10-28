@@ -33,7 +33,7 @@ on: { push: { branches: [main] }, pull_request: {}, workflow_dispatch: {} }
 jobs:
   # Secret-less gate — its own job so the clean-room install is truly isolated.
   npm-lockfile-hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-large
     steps:
       - uses: actions/checkout@<sha>          # v4
       - uses: twilio/sdk-actions/npm-lockfile-hygiene@<sha>  # v1.2.3
@@ -42,7 +42,7 @@ jobs:
 
   test:
     # Fork PRs -> GitHub-hosted; internal PRs -> your self-hosted runner. Your call.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest-large' || 'ubuntu-x64' }}
     permissions:
       contents: read
       id-token: write                         # needed for the OIDC login below
@@ -76,13 +76,13 @@ npm-specific and doesn't apply.
 jobs:
   # Secret-less gate — its own job so the clean-room install is truly isolated.
   uv-lockfile-hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-large
     steps:
       - uses: actions/checkout@<sha>          # v4
       - uses: twilio/sdk-actions/uv-lockfile-hygiene@<sha>  # v1.2.3
 
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest-large' || 'ubuntu-x64' }}
     permissions:
       contents: read
       id-token: write                         # needed for the OIDC login below
@@ -115,13 +115,13 @@ apply — see the publishing note below.
 jobs:
   # Secret-less gate — its own job so the clean-room install is truly isolated.
   composer-lockfile-hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-large
     steps:
       - uses: actions/checkout@<sha>          # v5
       - uses: twilio/sdk-actions/composer-lockfile-hygiene@<sha>  # v1.1.0
 
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest-large' || 'ubuntu-x64' }}
     permissions:
       contents: read
       id-token: write                         # needed for the OIDC login below
@@ -162,13 +162,13 @@ Bundler::GemHelper.install_tasks(tag_prefix: '')
 jobs:
   # Secret-less gate — its own job so the clean-room install is truly isolated.
   gems-lockfile-hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-large
     steps:
       - uses: actions/checkout@<sha>
       - uses: twilio/sdk-actions/gems-lockfile-hygiene@<sha>
 
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest-large' || 'ubuntu-x64' }}
     permissions:
       contents: read
       id-token: write                         # needed for the OIDC login below
@@ -271,13 +271,13 @@ on: { push: { branches: [main] }, pull_request: {}, workflow_dispatch: {} }
 jobs:
   # Secret-less gate — its own job so the clean-room resolve is truly isolated.
   go-lockfile-hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-large
     steps:
       - uses: actions/checkout@<sha>          # v5
       - uses: twilio/sdk-actions/go-lockfile-hygiene@<sha>
 
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest-large' || 'ubuntu-x64' }}
     permissions:
       contents: read
       id-token: write                         # needed for the OIDC login below
